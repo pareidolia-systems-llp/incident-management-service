@@ -1,4 +1,4 @@
-package com.pareidolia.incident_management_service;
+package com.pareidolia.incidentmanagement;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;

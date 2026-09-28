@@ -1,4 +1,4 @@
-package com.pareidolia.incident_management_service;
+package com.pareidolia.incidentmanagement;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
