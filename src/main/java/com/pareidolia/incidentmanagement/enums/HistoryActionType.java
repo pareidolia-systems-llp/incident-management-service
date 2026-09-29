@@ -1,0 +1,16 @@
+package com.pareidolia.incidentmanagement.enums;
+
+public enum HistoryActionType {
+    INCIDENT_CREATED,
+    OWNER_ASSIGNED,
+    STATUS_CHANGED,
+    ISSUE_TYPE_CHANGED,
+    SEVERITY_CHANGED,
+    PRIORITY_CHANGED,
+    ESCALATED,
+    INVESTIGATION_UPDATED,
+    INCIDENT_RESOLVED,
+    INCIDENT_VALIDATED,
+    INCIDENT_CLOSED,
+    INCIDENT_REVIEWED
+}
