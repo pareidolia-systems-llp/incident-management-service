@@ -88,7 +88,7 @@ public class IncidentServiceImpl implements IncidentService {
             transitionStatus(incident, IncidentStatus.ASSIGNED, request.getChangedBy(), request.getRemarks());
         }
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -110,7 +110,7 @@ public class IncidentServiceImpl implements IncidentService {
             transitionStatus(incident, IncidentStatus.IN_PROGRESS, request.getChangedBy(), request.getRemarks());
         }
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -124,7 +124,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.ISSUE_TYPE_CHANGED, oldIssueType, enumValue(request.getIssueType()),
                 request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -138,7 +138,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.SEVERITY_CHANGED, oldSeverity, enumValue(request.getSeverity()),
                 request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -152,7 +152,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.PRIORITY_CHANGED, oldPriority, enumValue(request.getPriority()),
                 request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -167,7 +167,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.ESCALATED, oldEscalationDetails, request.getEscalationDetails(),
                 request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -181,7 +181,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.EVIDENCE_UPDATED, oldEvidenceReference, request.getEvidenceReference(),
                 request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -197,7 +197,7 @@ public class IncidentServiceImpl implements IncidentService {
                 request.getChangedBy(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.RESOLVED, request.getChangedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -214,7 +214,7 @@ public class IncidentServiceImpl implements IncidentService {
                 request.getValidatedBy(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.VALIDATED, request.getValidatedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -229,7 +229,7 @@ public class IncidentServiceImpl implements IncidentService {
                 request.getClosureConfirmedBy(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.CLOSED, request.getClosureConfirmedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -251,7 +251,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.INCIDENT_REVIEWED, oldReviewDetails, request.getReviewDetails(),
                 request.getReviewedBy(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.save(incident));
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
