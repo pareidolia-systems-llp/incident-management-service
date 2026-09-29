@@ -237,6 +237,9 @@ public class IncidentServiceImpl implements IncidentService {
     public IncidentResponseDto reviewIncident(Long id, ReviewIncidentRequestDto request) {
         Incident incident = findIncident(id);
         requireStatus(incident, "review", IncidentStatus.CLOSED);
+        if (incident.getReviewedAt() != null) {
+            throw new InvalidIncidentStateException("Incident has already been reviewed.");
+        }
 
         String oldReviewDetails = incident.getReviewDetails();
         incident.setReviewDetails(request.getReviewDetails());
