@@ -5,6 +5,9 @@ import com.pareidolia.incidentmanagement.entity.AppUser;
 import com.pareidolia.incidentmanagement.enums.AppUserRole;
 import com.pareidolia.incidentmanagement.repository.AppUserRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,16 +23,16 @@ public class AppUserService {
 
     private final AppUserRepository appUserRepository;
     private final Set<String> bootstrapAdminEmails;
+    private final Set<String> bootstrapItHandlerEmails;
 
     public AppUserService(
             AppUserRepository appUserRepository,
-            @Value("${app.auth.bootstrap-admin-emails}") String configuredBootstrapAdminEmails
+            @Value("${app.auth.bootstrap-admin-emails}") String configuredBootstrapAdminEmails,
+            @Value("${app.auth.bootstrap-it-handler-emails}") String configuredBootstrapItHandlerEmails
     ) {
         this.appUserRepository = appUserRepository;
-        this.bootstrapAdminEmails = Arrays.stream(configuredBootstrapAdminEmails.split(","))
-                .map(this::normalizeEmail)
-                .filter(email -> !email.isEmpty())
-                .collect(Collectors.toUnmodifiableSet());
+        this.bootstrapAdminEmails = parseConfiguredEmails(configuredBootstrapAdminEmails);
+        this.bootstrapItHandlerEmails = parseConfiguredEmails(configuredBootstrapItHandlerEmails);
     }
 
     @Transactional
@@ -49,15 +52,31 @@ public class AppUserService {
         }
         if (bootstrapAdminEmails.contains(email)) {
             appUser.setRole(AppUserRole.ADMIN);
+        } else if (bootstrapItHandlerEmails.contains(email)
+                && appUser.getRole() != AppUserRole.ADMIN) {
+            appUser.setRole(AppUserRole.IT_HANDLER);
         }
         return appUserRepository.save(appUser);
     }
 
     @Transactional(readOnly = true)
-    public AuthenticatedUserResponseDto getCurrentUser(String rawEmail) {
-        AppUser appUser = appUserRepository.findByEmail(normalizeEmail(rawEmail))
-                .orElseThrow(() -> new IllegalStateException("Authenticated application user was not found."));
+    public AuthenticatedUserResponseDto getAuthenticatedUserResponse() {
+        return toResponse(getAuthenticatedUser());
+    }
 
+    @Transactional(readOnly = true)
+    public AppUser getAuthenticatedUser() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()
+                || !(authentication.getPrincipal() instanceof OidcUser oidcUser)) {
+            throw new AccessDeniedException("Authentication is required.");
+        }
+
+        return appUserRepository.findByEmail(normalizeEmail(oidcUser.getEmail()))
+                .orElseThrow(() -> new AccessDeniedException("Authenticated application user was not found."));
+    }
+
+    private AuthenticatedUserResponseDto toResponse(AppUser appUser) {
         AuthenticatedUserResponseDto response = new AuthenticatedUserResponseDto();
         response.setEmail(appUser.getEmail());
         response.setDisplayName(appUser.getDisplayName());
@@ -72,5 +91,12 @@ public class AppUserService {
 
     private String normalizeEmail(String email) {
         return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private Set<String> parseConfiguredEmails(String configuredEmails) {
+        return Arrays.stream(configuredEmails.split(","))
+                .map(this::normalizeEmail)
+                .filter(email -> !email.isEmpty())
+                .collect(Collectors.toUnmodifiableSet());
     }
 }

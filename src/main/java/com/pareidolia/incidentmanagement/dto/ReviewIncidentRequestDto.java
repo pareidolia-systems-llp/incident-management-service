@@ -15,10 +15,6 @@ public class ReviewIncidentRequestDto {
     @Size(max = 65535)
     private String reviewDetails;
 
-    @NotBlank
-    @Size(max = 150)
-    private String reviewedBy;
-
     @Size(max = 65535)
     private String lessonsLearned;
 

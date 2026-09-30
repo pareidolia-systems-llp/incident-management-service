@@ -15,10 +15,6 @@ public class EscalateIncidentRequestDto {
     @Size(max = 65535)
     private String escalationDetails;
 
-    @NotBlank
-    @Size(max = 150)
-    private String changedBy;
-
     @Size(max = 65535)
     private String remarks;
 }

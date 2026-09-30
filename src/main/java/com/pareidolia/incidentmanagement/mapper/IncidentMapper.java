@@ -16,7 +16,6 @@ public class IncidentMapper {
         }
 
         Incident incident = new Incident();
-        incident.setReportedBy(dto.getReportedBy());
         incident.setReporterDepartment(dto.getReporterDepartment());
         incident.setTitle(dto.getTitle());
         incident.setDescription(dto.getDescription());

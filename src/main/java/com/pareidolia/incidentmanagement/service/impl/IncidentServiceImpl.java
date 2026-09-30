@@ -1,8 +1,10 @@
 package com.pareidolia.incidentmanagement.service.impl;
 
 import com.pareidolia.incidentmanagement.dto.*;
+import com.pareidolia.incidentmanagement.entity.AppUser;
 import com.pareidolia.incidentmanagement.entity.Incident;
 import com.pareidolia.incidentmanagement.entity.IncidentHistory;
+import com.pareidolia.incidentmanagement.enums.AppUserRole;
 import com.pareidolia.incidentmanagement.enums.HistoryActionType;
 import com.pareidolia.incidentmanagement.enums.IncidentStatus;
 import com.pareidolia.incidentmanagement.exception.IncidentNotFoundException;
@@ -11,7 +13,9 @@ import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.repository.IncidentHistoryRepository;
 import com.pareidolia.incidentmanagement.repository.IncidentRepository;
 import com.pareidolia.incidentmanagement.service.IncidentService;
-import lombok.RequiredArgsConstructor;
+import com.pareidolia.incidentmanagement.service.AppUserService;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,22 +26,43 @@ import java.util.Locale;
 import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
 public class IncidentServiceImpl implements IncidentService {
 
+    private static final String SYSTEM_ACTOR = "SYSTEM";
     private static final DateTimeFormatter INCIDENT_YEAR_FORMAT = DateTimeFormatter.ofPattern("yyyy");
     private static final DateTimeFormatter INCIDENT_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
     private final IncidentRepository incidentRepository;
     private final IncidentHistoryRepository incidentHistoryRepository;
     private final IncidentMapper incidentMapper;
+    private final AppUserService appUserService;
+    private final String defaultItOwner;
+
+    public IncidentServiceImpl(
+            IncidentRepository incidentRepository,
+            IncidentHistoryRepository incidentHistoryRepository,
+            IncidentMapper incidentMapper,
+            AppUserService appUserService,
+            @Value("${app.default-it-owner}") String defaultItOwner
+    ) {
+        this.incidentRepository = incidentRepository;
+        this.incidentHistoryRepository = incidentHistoryRepository;
+        this.incidentMapper = incidentMapper;
+        this.appUserService = appUserService;
+        this.defaultItOwner = defaultItOwner.trim();
+    }
 
     @Override
     @Transactional
     public IncidentResponseDto createIncident(CreateIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.REPORTER, AppUserRole.ADMIN);
+
         Incident incident = incidentMapper.toEntity(request);
+        incident.setReportedBy(actor.getEmail());
         incident.setIncidentNumber(generateIncidentNumber());
-        incident.setStatus(IncidentStatus.OPEN);
+        incident.setAssignedOwner(defaultItOwner);
+        incident.setStatus(IncidentStatus.ASSIGNED);
 
         Incident savedIncident = incidentRepository.save(incident);
         recordHistory(
@@ -45,8 +70,16 @@ public class IncidentServiceImpl implements IncidentService {
                 HistoryActionType.INCIDENT_CREATED,
                 null,
                 savedIncident.getIncidentNumber(),
-                request.getReportedBy(),
+                actor.getEmail(),
                 null
+        );
+        recordHistory(
+                savedIncident,
+                HistoryActionType.OWNER_ASSIGNED,
+                null,
+                savedIncident.getAssignedOwner(),
+                SYSTEM_ACTOR,
+                "Automatically assigned to the configured default IT owner."
         );
         return incidentMapper.toResponseDto(savedIncident);
     }
@@ -54,21 +87,30 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional(readOnly = true)
     public IncidentResponseDto getIncident(Long id) {
-        return incidentMapper.toResponseDto(findIncident(id));
+        AppUser actor = getAuthenticatedUser();
+        Incident incident = findIncident(id);
+        ensureCanViewIncident(actor, incident);
+        return incidentMapper.toResponseDto(incident);
     }
 
     @Override
     @Transactional(readOnly = true)
     public IncidentResponseDto getIncidentByNumber(String incidentNumber) {
+        AppUser actor = getAuthenticatedUser();
         Incident incident = incidentRepository.findByIncidentNumber(incidentNumber)
                 .orElseThrow(() -> new IncidentNotFoundException("Incident not found with number: " + incidentNumber));
+        ensureCanViewIncident(actor, incident);
         return incidentMapper.toResponseDto(incident);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<IncidentResponseDto> getAllIncidents() {
-        return incidentRepository.findAll().stream()
+        AppUser actor = getAuthenticatedUser();
+        List<Incident> incidents = actor.getRole() == AppUserRole.REPORTER
+                ? incidentRepository.findByReportedByIgnoreCase(actor.getEmail())
+                : incidentRepository.findAll();
+        return incidents.stream()
                 .map(incidentMapper::toResponseDto)
                 .toList();
     }
@@ -76,16 +118,18 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto assignIncident(Long id, AssignIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "assign");
 
         String oldOwner = incident.getAssignedOwner();
         incident.setAssignedOwner(request.getAssignedOwner());
         recordHistory(incident, HistoryActionType.OWNER_ASSIGNED, oldOwner, request.getAssignedOwner(),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         if (incident.getStatus() == IncidentStatus.OPEN) {
-            transitionStatus(incident, IncidentStatus.ASSIGNED, request.getChangedBy(), request.getRemarks());
+            transitionStatus(incident, IncidentStatus.ASSIGNED, actor.getEmail(), request.getRemarks());
         }
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
@@ -94,6 +138,8 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto updateInvestigation(Long id, UpdateInvestigationRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "update investigation for");
 
@@ -104,10 +150,10 @@ public class IncidentServiceImpl implements IncidentService {
         incident.setContainmentAction(request.getContainmentAction());
         incident.setCorrectiveAction(request.getCorrectiveAction());
         recordHistory(incident, HistoryActionType.INVESTIGATION_UPDATED, oldInvestigationDetails,
-                request.getInvestigationDetails(), request.getChangedBy(), request.getRemarks());
+                request.getInvestigationDetails(), actor.getEmail(), request.getRemarks());
 
         if (incident.getStatus() == IncidentStatus.OPEN || incident.getStatus() == IncidentStatus.ASSIGNED) {
-            transitionStatus(incident, IncidentStatus.IN_PROGRESS, request.getChangedBy(), request.getRemarks());
+            transitionStatus(incident, IncidentStatus.IN_PROGRESS, actor.getEmail(), request.getRemarks());
         }
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
@@ -116,13 +162,15 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto reclassifyIncident(Long id, ReclassifyIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "reclassify");
 
         String oldIssueType = enumValue(incident.getIssueType());
         incident.setIssueType(request.getIssueType());
         recordHistory(incident, HistoryActionType.ISSUE_TYPE_CHANGED, oldIssueType, enumValue(request.getIssueType()),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -130,13 +178,15 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto changeSeverity(Long id, ChangeSeverityRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "change severity for");
 
         String oldSeverity = enumValue(incident.getSeverity());
         incident.setSeverity(request.getSeverity());
         recordHistory(incident, HistoryActionType.SEVERITY_CHANGED, oldSeverity, enumValue(request.getSeverity()),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -144,13 +194,15 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto changePriority(Long id, ChangePriorityRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "change priority for");
 
         String oldPriority = enumValue(incident.getPriority());
         incident.setPriority(request.getPriority());
         recordHistory(incident, HistoryActionType.PRIORITY_CHANGED, oldPriority, enumValue(request.getPriority()),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -158,6 +210,8 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto escalateIncident(Long id, EscalateIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "escalate");
 
@@ -165,7 +219,7 @@ public class IncidentServiceImpl implements IncidentService {
         incident.setEscalationRequired(Boolean.TRUE);
         incident.setEscalationDetails(request.getEscalationDetails());
         recordHistory(incident, HistoryActionType.ESCALATED, oldEscalationDetails, request.getEscalationDetails(),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -173,13 +227,15 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto updateEvidenceReference(Long id, UpdateEvidenceReferenceRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         ensureNotClosed(incident, "update evidence for");
 
         String oldEvidenceReference = incident.getEvidenceReference();
         incident.setEvidenceReference(request.getEvidenceReference());
         recordHistory(incident, HistoryActionType.EVIDENCE_UPDATED, oldEvidenceReference, request.getEvidenceReference(),
-                request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -187,6 +243,8 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto resolveIncident(Long id, ResolveIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         requireStatus(incident, "resolve", IncidentStatus.ASSIGNED, IncidentStatus.IN_PROGRESS);
 
@@ -194,8 +252,8 @@ public class IncidentServiceImpl implements IncidentService {
         incident.setResolutionDetails(request.getResolutionDetails());
         incident.setResolvedAt(LocalDateTime.now());
         recordHistory(incident, HistoryActionType.INCIDENT_RESOLVED, oldResolutionDetails, request.getResolutionDetails(),
-                request.getChangedBy(), request.getRemarks());
-        transitionStatus(incident, IncidentStatus.RESOLVED, request.getChangedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
+        transitionStatus(incident, IncidentStatus.RESOLVED, actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -203,16 +261,18 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto validateIncident(Long id, ValidateIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         requireStatus(incident, "validate", IncidentStatus.RESOLVED);
 
         String oldValidationDetails = incident.getValidationDetails();
         incident.setValidationDetails(request.getValidationDetails());
-        incident.setValidatedBy(request.getValidatedBy());
+        incident.setValidatedBy(actor.getEmail());
         incident.setValidatedAt(LocalDateTime.now());
         recordHistory(incident, HistoryActionType.INCIDENT_VALIDATED, oldValidationDetails, request.getValidationDetails(),
-                request.getValidatedBy(), request.getRemarks());
-        transitionStatus(incident, IncidentStatus.VALIDATED, request.getValidatedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
+        transitionStatus(incident, IncidentStatus.VALIDATED, actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -220,14 +280,16 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto closeIncident(Long id, CloseIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         requireStatus(incident, "close", IncidentStatus.VALIDATED);
 
-        incident.setClosureConfirmedBy(request.getClosureConfirmedBy());
+        incident.setClosureConfirmedBy(actor.getEmail());
         incident.setClosedAt(LocalDateTime.now());
         recordHistory(incident, HistoryActionType.INCIDENT_CLOSED, null, IncidentStatus.CLOSED.name(),
-                request.getClosureConfirmedBy(), request.getRemarks());
-        transitionStatus(incident, IncidentStatus.CLOSED, request.getClosureConfirmedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
+        transitionStatus(incident, IncidentStatus.CLOSED, actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -235,6 +297,8 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto reviewIncident(Long id, ReviewIncidentRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         requireStatus(incident, "review", IncidentStatus.CLOSED);
         if (incident.getReviewedAt() != null) {
@@ -243,7 +307,7 @@ public class IncidentServiceImpl implements IncidentService {
 
         String oldReviewDetails = incident.getReviewDetails();
         incident.setReviewDetails(request.getReviewDetails());
-        incident.setReviewedBy(request.getReviewedBy());
+        incident.setReviewedBy(actor.getEmail());
         incident.setReviewedAt(LocalDateTime.now());
         if (request.getLessonsLearned() != null) {
             incident.setLessonsLearned(request.getLessonsLearned());
@@ -252,7 +316,7 @@ public class IncidentServiceImpl implements IncidentService {
             incident.setPreventiveAction(request.getPreventiveAction());
         }
         recordHistory(incident, HistoryActionType.INCIDENT_REVIEWED, oldReviewDetails, request.getReviewDetails(),
-                request.getReviewedBy(), request.getRemarks());
+                actor.getEmail(), request.getRemarks());
 
         return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
     }
@@ -260,7 +324,9 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional(readOnly = true)
     public List<IncidentHistoryResponseDto> getIncidentHistory(Long id) {
-        findIncident(id);
+        AppUser actor = getAuthenticatedUser();
+        Incident incident = findIncident(id);
+        ensureCanViewIncident(actor, incident);
         return incidentHistoryRepository.findByIncidentIdOrderByChangedAtDesc(id).stream()
                 .map(incidentMapper::toHistoryResponseDto)
                 .toList();
@@ -269,6 +335,26 @@ public class IncidentServiceImpl implements IncidentService {
     private Incident findIncident(Long id) {
         return incidentRepository.findById(id)
                 .orElseThrow(() -> new IncidentNotFoundException("Incident not found with id: " + id));
+    }
+
+    private AppUser getAuthenticatedUser() {
+        return appUserService.getAuthenticatedUser();
+    }
+
+    private void requireRole(AppUser appUser, AppUserRole... allowedRoles) {
+        for (AppUserRole allowedRole : allowedRoles) {
+            if (appUser.getRole() == allowedRole) {
+                return;
+            }
+        }
+        throw new AccessDeniedException("Access denied.");
+    }
+
+    private void ensureCanViewIncident(AppUser appUser, Incident incident) {
+        if (appUser.getRole() == AppUserRole.REPORTER
+                && !appUser.getEmail().equalsIgnoreCase(incident.getReportedBy())) {
+            throw new AccessDeniedException("Access denied.");
+        }
     }
 
     private String generateIncidentNumber() {

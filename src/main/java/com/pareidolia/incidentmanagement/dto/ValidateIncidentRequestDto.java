@@ -15,10 +15,6 @@ public class ValidateIncidentRequestDto {
     @Size(max = 65535)
     private String validationDetails;
 
-    @NotBlank
-    @Size(max = 150)
-    private String validatedBy;
-
     @Size(max = 65535)
     private String remarks;
 }

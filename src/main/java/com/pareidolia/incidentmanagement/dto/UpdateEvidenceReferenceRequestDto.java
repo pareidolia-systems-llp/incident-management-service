@@ -15,10 +15,6 @@ public class UpdateEvidenceReferenceRequestDto {
     @Size(max = 500)
     private String evidenceReference;
 
-    @NotBlank
-    @Size(max = 150)
-    private String changedBy;
-
     @Size(max = 65535)
     private String remarks;
 }

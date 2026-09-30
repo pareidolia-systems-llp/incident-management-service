@@ -15,10 +15,6 @@ import lombok.Setter;
 @NoArgsConstructor
 public class CreateIncidentRequestDto {
 
-    @NotBlank
-    @Size(max = 150)
-    private String reportedBy;
-
     @Size(max = 150)
     private String reporterDepartment;
 

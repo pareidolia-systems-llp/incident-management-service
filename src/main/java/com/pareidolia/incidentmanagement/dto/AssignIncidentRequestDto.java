@@ -15,10 +15,6 @@ public class AssignIncidentRequestDto {
     @Size(max = 150)
     private String assignedOwner;
 
-    @NotBlank
-    @Size(max = 150)
-    private String changedBy;
-
     @Size(max = 65535)
     private String remarks;
 }
