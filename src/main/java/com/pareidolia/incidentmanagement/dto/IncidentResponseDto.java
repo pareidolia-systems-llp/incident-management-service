@@ -20,6 +20,7 @@ public class IncidentResponseDto {
     private LocalDateTime reportedAt;
     private String reportedBy;
     private String reporterDepartment;
+    private String deskNumber;
     private String title;
     private String description;
     private IssueType issueType;

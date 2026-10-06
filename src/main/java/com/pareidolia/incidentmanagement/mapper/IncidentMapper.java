@@ -17,6 +17,7 @@ public class IncidentMapper {
 
         Incident incident = new Incident();
         incident.setReporterDepartment(dto.getReporterDepartment());
+        incident.setDeskNumber(dto.getDeskNumber());
         incident.setTitle(dto.getTitle());
         incident.setDescription(dto.getDescription());
         incident.setIssueType(dto.getIssueType());
@@ -39,6 +40,7 @@ public class IncidentMapper {
         dto.setReportedAt(incident.getReportedAt());
         dto.setReportedBy(incident.getReportedBy());
         dto.setReporterDepartment(incident.getReporterDepartment());
+        dto.setDeskNumber(incident.getDeskNumber());
         dto.setTitle(incident.getTitle());
         dto.setDescription(incident.getDescription());
         dto.setIssueType(incident.getIssueType());
