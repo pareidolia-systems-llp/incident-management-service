@@ -60,6 +60,10 @@ public class Incident {
     @Column(name = "reporter_department", length = 150)
     private String reporterDepartment;
 
+    @Size(max = 255)
+    @Column(name = "desk_number", length = 255)
+    private String deskNumber;
+
     @NotBlank
     @Size(max = 255)
     @Column(nullable = false, length = 255)

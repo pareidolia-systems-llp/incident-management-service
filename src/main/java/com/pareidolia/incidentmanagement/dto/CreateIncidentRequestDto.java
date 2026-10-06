@@ -18,6 +18,9 @@ public class CreateIncidentRequestDto {
     @Size(max = 150)
     private String reporterDepartment;
 
+    @Size(max = 255)
+    private String deskNumber;
+
     @NotBlank
     @Size(max = 255)
     private String title;
@@ -32,6 +35,7 @@ public class CreateIncidentRequestDto {
     @Size(max = 100)
     private String category;
 
+    @NotBlank
     @Size(max = 255)
     private String affectedSystem;
 
