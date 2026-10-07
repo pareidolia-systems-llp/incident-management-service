@@ -101,6 +101,94 @@ class IncidentLocationTests {
                 .content(json.writeValueAsString(Map.of("remarks", "Reporter confirmed closure."))));
     }
 
+    private ResultActions validate(long id) throws Exception {
+        return mvc.perform(post("/api/incidents/{id}/validate", id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(Map.of(
+                        "validationDetails", "Access restored and normal use confirmed.",
+                        "remarks", "Tested the affected service."))));
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void originalReporterValidatesResolvedIncidentAndRecordsAuthenticatedActor(AppUserRole role) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        var incident = repository.findById(id).orElseThrow();
+        incident.setReportedBy(" reporter@EXAMPLE.test ");
+        repository.saveAndFlush(incident);
+        authenticateAs(" REPORTER@example.test ", role);
+        long historyCount = historyRepository.count();
+
+        validate(id).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("VALIDATED"))
+                .andExpect(jsonPath("$.validatedBy").value(" REPORTER@example.test "))
+                .andExpect(jsonPath("$.validatedAt").isNotEmpty())
+                .andExpect(jsonPath("$.validationDetails").value("Access restored and normal use confirmed."));
+        entityManager.flush();
+        entityManager.clear();
+        var saved = repository.findById(id).orElseThrow();
+        assertThat(saved.getValidatedBy()).isEqualTo(" REPORTER@example.test ");
+        assertThat(saved.getValidatedAt()).isNotNull();
+        assertThat(saved.getStatus()).isEqualTo(IncidentStatus.VALIDATED);
+        assertThat(saved.getValidationDetails()).isEqualTo("Access restored and normal use confirmed.");
+        assertThat(historyRepository.count()).isEqualTo(historyCount + 2);
+        var history = historyRepository.findByIncidentIdOrderByChangedAtDesc(id);
+        assertThat(history).filteredOn(entry -> entry.getActionType()
+                == com.pareidolia.incidentmanagement.enums.HistoryActionType.INCIDENT_VALIDATED)
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.getChangedBy()).isEqualTo(" REPORTER@example.test ");
+                    assertThat(entry.getRemarks()).isEqualTo("Tested the affected service.");
+                    assertThat(entry.getNewValue()).isEqualTo("Access restored and normal use confirmed.");
+                });
+        assertThat(history).filteredOn(entry -> "VALIDATED".equals(entry.getNewValue()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.getOldValue()).isEqualTo("RESOLVED");
+                    assertThat(entry.getChangedBy()).isEqualTo(" REPORTER@example.test ");
+                    assertThat(entry.getRemarks()).isEqualTo("Tested the affected service.");
+                });
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void nonOriginalReporterCannotValidateResolvedIncident(AppUserRole role) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        authenticateAs("other@example.test", role);
+        long historyCount = historyRepository.count();
+
+        validate(id).andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value("Access denied."));
+        var saved = repository.findById(id).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(saved.getValidatedBy()).isNull();
+        assertThat(saved.getValidatedAt()).isNull();
+        assertThat(saved.getValidationDetails()).isNull();
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = IncidentStatus.class, names = "RESOLVED", mode = EnumSource.Mode.EXCLUDE)
+    void originalReporterCannotValidateAtOtherStages(IncidentStatus incidentStatus) throws Exception {
+        long id = create(request());
+        setStatus(id, incidentStatus);
+        long historyCount = historyRepository.count();
+
+        validate(id).andExpect(status().isConflict());
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(incidentStatus);
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"   "})
+    void missingAuthenticatedIdentityCannotValidate(String email) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        authenticateAs(email, AppUserRole.ADMIN);
+        validate(id).andExpect(status().isForbidden());
+    }
+
     @ParameterizedTest
     @EnumSource(AppUserRole.class)
     void listReturnsNewestCreatedIncidentFirst(AppUserRole role) throws Exception {
@@ -270,6 +358,13 @@ class IncidentLocationTests {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of("remarks", "Reporter confirmed closure."))))
                 .andExpect(status().isForbidden());
+
+        incident.setStatus(IncidentStatus.RESOLVED);
+        isolatedMvc.perform(post("/api/incidents/{id}/validate", 999L)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("validationDetails", "Fix works."))))
+                .andExpect(status().isForbidden());
+        org.mockito.Mockito.verify(isolatedRepository, org.mockito.Mockito.never()).saveAndFlush(incident);
     }
 
     @ParameterizedTest
