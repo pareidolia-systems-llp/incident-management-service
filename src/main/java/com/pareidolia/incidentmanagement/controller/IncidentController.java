@@ -127,6 +127,14 @@ public class IncidentController {
         return ResponseEntity.ok(incidentService.closeIncident(id, request));
     }
 
+    @PostMapping("/{id}/resolution-feedback")
+    public ResponseEntity<IncidentResponseDto> submitResolutionFeedback(
+            @PathVariable Long id,
+            @Valid @RequestBody ResolutionFeedbackRequestDto request
+    ) {
+        return ResponseEntity.ok(incidentService.submitResolutionFeedback(id, request));
+    }
+
     @PostMapping("/{id}/review")
     public ResponseEntity<IncidentResponseDto> reviewIncident(
             @PathVariable Long id,
