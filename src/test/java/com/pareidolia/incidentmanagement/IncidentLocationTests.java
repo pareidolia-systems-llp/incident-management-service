@@ -15,6 +15,7 @@ import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -98,6 +99,86 @@ class IncidentLocationTests {
         return mvc.perform(post("/api/incidents/{id}/close", id)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsString(Map.of("remarks", "Reporter confirmed closure."))));
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void listReturnsNewestCreatedIncidentFirst(AppUserRole role) throws Exception {
+        long a = create(request());
+        long b = create(request());
+        long c = create(request());
+        setCreatedAt(a, "2026-01-01T10:00:00");
+        setCreatedAt(b, "2026-01-02T10:00:00");
+        setCreatedAt(c, "2026-01-03T10:00:00");
+        authenticateAs("REPORTER@example.test", role);
+
+        assertListOrder(c, b, a);
+
+        // Prove createdAt takes precedence over ID (and reportedAt).
+        setCreatedAt(a, "2026-01-04T10:00:00");
+        assertListOrder(a, c, b);
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void listBreaksEqualCreationTimestampsByHigherIdFirst(AppUserRole role) throws Exception {
+        long a = create(request());
+        long b = create(request());
+        setCreatedAt(a, "2026-01-01T10:00:00");
+        setCreatedAt(b, "2026-01-01T10:00:00");
+        assertThat(b).isGreaterThan(a);
+        authenticateAs("reporter@example.test", role);
+
+        assertListOrder(b, a);
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void listPreservesVisibilityAndResponseFields(AppUserRole role) throws Exception {
+        Map<String, Object> body = request();
+        body.put("deskNumber", "Desk D-214");
+        long own = create(body);
+        authenticateAs("other@example.test", AppUserRole.REPORTER);
+        long other = create(request());
+        setCreatedAt(own, "2026-01-01T10:00:00");
+        setCreatedAt(other, "2026-01-02T10:00:00");
+        authenticateAs("REPORTER@example.test", role);
+
+        if (role == AppUserRole.REPORTER) {
+            assertListOrder(own);
+        } else {
+            assertListOrder(other, own);
+        }
+        String detail = mvc.perform(get("/api/incidents/{id}", own))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.deskNumber").value("Desk D-214"))
+                .andExpect(jsonPath("$.affectedSystem").value("Corporate VPN"))
+                .andReturn().getResponse().getContentAsString();
+        String list = mvc.perform(get("/api/incidents"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        assertThat(json.readTree(list).get(role == AppUserRole.REPORTER ? 0 : 1))
+                .isEqualTo(json.readTree(detail));
+
+        authenticateAs("nobody@example.test", AppUserRole.REPORTER);
+        assertListOrder();
+    }
+
+    private void setCreatedAt(long id, String timestamp) {
+        entityManager.flush();
+        // createdAt is immutable through JPA; set exact persisted fixtures without sleeps.
+        entityManager.createNativeQuery("update incidents set created_at = :timestamp where id = :id")
+                .setParameter("timestamp", java.time.LocalDateTime.parse(timestamp))
+                .setParameter("id", id).executeUpdate();
+        entityManager.clear();
+    }
+
+    private void assertListOrder(long... ids) throws Exception {
+        ResultActions result = mvc.perform(get("/api/incidents"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(ids.length));
+        for (int i = 0; i < ids.length; i++) {
+            result.andExpect(jsonPath("$[" + i + "].id").value(ids[i]));
+        }
     }
 
     @Test

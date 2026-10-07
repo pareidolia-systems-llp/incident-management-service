@@ -108,8 +108,8 @@ public class IncidentServiceImpl implements IncidentService {
     public List<IncidentResponseDto> getAllIncidents() {
         AppUser actor = getAuthenticatedUser();
         List<Incident> incidents = actor.getRole() == AppUserRole.REPORTER
-                ? incidentRepository.findByReportedByIgnoreCase(actor.getEmail())
-                : incidentRepository.findAll();
+                ? incidentRepository.findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(actor.getEmail())
+                : incidentRepository.findAllByOrderByCreatedAtDescIdDesc();
         return incidents.stream()
                 .map(incidentMapper::toResponseDto)
                 .toList();
