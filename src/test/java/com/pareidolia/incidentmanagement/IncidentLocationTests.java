@@ -109,6 +109,145 @@ class IncidentLocationTests {
                         "remarks", "Tested the affected service."))));
     }
 
+    private ResultActions feedback(long id, Map<String, Object> body) throws Exception {
+        return mvc.perform(post("/api/incidents/{id}/resolution-feedback", id)
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(body)));
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void originalReporterReturnsResolutionToInvestigationWithoutLosingInformation(AppUserRole role) throws Exception {
+        long id = create(request());
+        var incident = repository.findById(id).orElseThrow();
+        incident.setReportedBy(" reporter@EXAMPLE.test ");
+        incident.setStatus(IncidentStatus.RESOLVED);
+        incident.setAssignedOwner("assigned-handler@example.test");
+        incident.setInvestigationDetails("Investigated login configuration.");
+        incident.setResolutionDetails("Reset authentication configuration.");
+        var resolvedAt = java.time.LocalDateTime.of(2026, 10, 7, 10, 0);
+        incident.setResolvedAt(resolvedAt);
+        incident.setEvidenceReference("Original investigation evidence");
+        repository.saveAndFlush(incident);
+        authenticateAs(" REPORTER@example.test ", role);
+        long historyCount = historyRepository.count();
+
+        feedback(id, Map.of("feedback", " Login still fails on my workstation. ",
+                "evidenceReference", " Screenshot LOGIN-ERROR-07OCT "))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("IN_PROGRESS"))
+                .andExpect(jsonPath("$.assignedOwner").value("assigned-handler@example.test"));
+        entityManager.flush();
+        entityManager.clear();
+        var saved = repository.findById(id).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        assertThat(saved.getAssignedOwner()).isEqualTo("assigned-handler@example.test");
+        assertThat(saved.getInvestigationDetails()).isEqualTo("Investigated login configuration.");
+        assertThat(saved.getResolutionDetails()).isEqualTo("Reset authentication configuration.");
+        assertThat(saved.getResolvedAt()).isEqualTo(resolvedAt);
+        assertThat(saved.getEvidenceReference()).isEqualTo("Original investigation evidence");
+        assertThat(historyRepository.count()).isEqualTo(historyCount + 2);
+        var entries = historyRepository.findByIncidentIdOrderByChangedAtDesc(id);
+        for (var action : java.util.List.of(
+                com.pareidolia.incidentmanagement.enums.HistoryActionType.RESOLUTION_NOT_ACCEPTED,
+                com.pareidolia.incidentmanagement.enums.HistoryActionType.STATUS_CHANGED)) {
+            assertThat(entries).filteredOn(entry -> entry.getActionType() == action)
+                    .singleElement().satisfies(entry -> {
+                        assertThat(entry.getChangedBy()).isEqualTo(" REPORTER@example.test ");
+                        assertThat(entry.getOldValue()).isEqualTo("RESOLVED");
+                        assertThat(entry.getNewValue()).isEqualTo("IN_PROGRESS");
+                        assertThat(entry.getRemarks()).isEqualTo("Reporter feedback: Login still fails on my workstation."
+                                + "\nEvidence reference: Screenshot LOGIN-ERROR-07OCT");
+                    });
+        }
+        // A duplicate submission cannot append feedback or change the workflow again.
+        feedback(id, Map.of("feedback", "Still failing")).andExpect(status().isConflict());
+        assertThat(historyRepository.count()).isEqualTo(historyCount + 2);
+    }
+
+    @ParameterizedTest
+    @EnumSource(AppUserRole.class)
+    void nonOriginalReporterCannotSubmitResolutionFeedback(AppUserRole role) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        authenticateAs("other@example.test", role);
+        long historyCount = historyRepository.count();
+        feedback(id, Map.of("feedback", "Still failing")).andExpect(status().isForbidden());
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = IncidentStatus.class, names = "RESOLVED", mode = EnumSource.Mode.EXCLUDE)
+    void resolutionFeedbackRequiresResolvedStatus(IncidentStatus incidentStatus) throws Exception {
+        long id = create(request());
+        setStatus(id, incidentStatus);
+        long historyCount = historyRepository.count();
+        feedback(id, Map.of("feedback", "Still failing")).andExpect(status().isConflict());
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(incidentStatus);
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"   "})
+    void feedbackIsRequired(String feedbackText) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (feedbackText != null) body.put("feedback", feedbackText);
+        long historyCount = historyRepository.count();
+        feedback(id, body).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.feedback").exists());
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"   "})
+    void resolutionFeedbackEvidenceIsOptional(String evidence) throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("feedback", "Still failing");
+        if (evidence != null) body.put("evidenceReference", evidence);
+        feedback(id, body).andExpect(status().isOk());
+        assertThat(historyRepository.findByIncidentIdOrderByChangedAtDesc(id))
+                .filteredOn(entry -> entry.getActionType()
+                        == com.pareidolia.incidentmanagement.enums.HistoryActionType.RESOLUTION_NOT_ACCEPTED)
+                .singleElement().satisfies(entry -> assertThat(entry.getRemarks()).isEqualTo("Reporter feedback: Still failing"));
+    }
+
+    @Test
+    void resolutionFeedbackRejectsOversizedInputWithoutChangingIncident() throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        long historyCount = historyRepository.count();
+        feedback(id, Map.of("feedback", "a".repeat(8001), "evidenceReference", "a".repeat(501)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.feedback").exists())
+                .andExpect(jsonPath("$.fieldErrors.evidenceReference").exists());
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(historyRepository.count()).isEqualTo(historyCount);
+    }
+
+    @Test
+    void feedbackAllowsAnotherResolutionThenReporterValidationAndClosure() throws Exception {
+        long id = create(request());
+        setStatus(id, IncidentStatus.RESOLVED);
+        feedback(id, Map.of("feedback", "Login still fails")).andExpect(status().isOk());
+        authenticateAs("handler@example.test", AppUserRole.IT_HANDLER);
+        mvc.perform(post("/api/incidents/{id}/resolve", id).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("resolutionDetails", "Repaired workstation configuration."))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("RESOLVED"));
+        authenticateAs("reporter@example.test", AppUserRole.REPORTER);
+        validate(id).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("VALIDATED"));
+        close(id).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CLOSED"));
+        mvc.perform(get("/api/incidents/{id}/history", id)).andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.actionType == 'RESOLUTION_NOT_ACCEPTED')].remarks")
+                        .value(org.hamcrest.Matchers.contains("Reporter feedback: Login still fails")));
+    }
+
     @ParameterizedTest
     @EnumSource(AppUserRole.class)
     void originalReporterValidatesResolvedIncidentAndRecordsAuthenticatedActor(AppUserRole role) throws Exception {
@@ -187,6 +326,7 @@ class IncidentLocationTests {
         setStatus(id, IncidentStatus.RESOLVED);
         authenticateAs(email, AppUserRole.ADMIN);
         validate(id).andExpect(status().isForbidden());
+        feedback(id, Map.of("feedback", "Still failing")).andExpect(status().isForbidden());
     }
 
     @ParameterizedTest
@@ -363,6 +503,11 @@ class IncidentLocationTests {
         isolatedMvc.perform(post("/api/incidents/{id}/validate", 999L)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of("validationDetails", "Fix works."))))
+                .andExpect(status().isForbidden());
+        org.mockito.Mockito.verify(isolatedRepository, org.mockito.Mockito.never()).saveAndFlush(incident);
+        isolatedMvc.perform(post("/api/incidents/{id}/resolution-feedback", 999L)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("feedback", "Still failing"))))
                 .andExpect(status().isForbidden());
         org.mockito.Mockito.verify(isolatedRepository, org.mockito.Mockito.never()).saveAndFlush(incident);
     }
