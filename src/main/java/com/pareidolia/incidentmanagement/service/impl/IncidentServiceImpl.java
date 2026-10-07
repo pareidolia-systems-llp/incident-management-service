@@ -262,8 +262,8 @@ public class IncidentServiceImpl implements IncidentService {
     @Transactional
     public IncidentResponseDto validateIncident(Long id, ValidateIncidentRequestDto request) {
         AppUser actor = getAuthenticatedUser();
-        requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireOriginalReporter(actor, incident, "validate");
         requireStatus(incident, "validate", IncidentStatus.RESOLVED);
 
         String oldValidationDetails = incident.getValidationDetails();
@@ -282,7 +282,7 @@ public class IncidentServiceImpl implements IncidentService {
     public IncidentResponseDto closeIncident(Long id, CloseIncidentRequestDto request) {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
-        requireOriginalReporter(actor, incident);
+        requireOriginalReporter(actor, incident, "close");
         requireStatus(incident, "close", IncidentStatus.VALIDATED);
 
         incident.setClosureConfirmedBy(actor.getEmail());
@@ -350,11 +350,11 @@ public class IncidentServiceImpl implements IncidentService {
         throw new AccessDeniedException("Access denied.");
     }
 
-    private void requireOriginalReporter(AppUser actor, Incident incident) {
+    private void requireOriginalReporter(AppUser actor, Incident incident, String action) {
         String actorEmail = actor == null || actor.getEmail() == null ? "" : actor.getEmail().trim();
         String reporterEmail = incident == null || incident.getReportedBy() == null ? "" : incident.getReportedBy().trim();
         if (actorEmail.isEmpty() || reporterEmail.isEmpty() || !actorEmail.equalsIgnoreCase(reporterEmail)) {
-            throw new AccessDeniedException("Only the original reporter may close this incident.");
+            throw new AccessDeniedException("Only the original reporter may " + action + " this incident.");
         }
     }
 
