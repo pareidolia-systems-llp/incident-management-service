@@ -10,5 +10,7 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
 
     Optional<Incident> findByIncidentNumber(String incidentNumber);
 
-    List<Incident> findByReportedByIgnoreCase(String reportedBy);
+    List<Incident> findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(String reportedBy);
+
+    List<Incident> findAllByOrderByCreatedAtDescIdDesc();
 }
