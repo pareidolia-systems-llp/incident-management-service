@@ -279,6 +279,25 @@ public class IncidentServiceImpl implements IncidentService {
 
     @Override
     @Transactional
+    public IncidentResponseDto submitResolutionFeedback(Long id, ResolutionFeedbackRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        Incident incident = findIncident(id);
+        requireOriginalReporter(actor, incident, "submit resolution feedback for");
+        requireStatus(incident, "submit resolution feedback for", IncidentStatus.RESOLVED);
+
+        String remarks = "Reporter feedback: " + request.getFeedback().trim();
+        if (request.getEvidenceReference() != null && !request.getEvidenceReference().isBlank()) {
+            remarks += "\nEvidence reference: " + request.getEvidenceReference().trim();
+        }
+        recordHistory(incident, HistoryActionType.RESOLUTION_NOT_ACCEPTED,
+                IncidentStatus.RESOLVED.name(), IncidentStatus.IN_PROGRESS.name(), actor.getEmail(), remarks);
+        transitionStatus(incident, IncidentStatus.IN_PROGRESS, actor.getEmail(), remarks);
+
+        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+    }
+
+    @Override
+    @Transactional
     public IncidentResponseDto closeIncident(Long id, CloseIncidentRequestDto request) {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);

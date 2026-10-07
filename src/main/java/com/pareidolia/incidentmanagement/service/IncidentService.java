@@ -10,6 +10,7 @@ import com.pareidolia.incidentmanagement.dto.IncidentHistoryResponseDto;
 import com.pareidolia.incidentmanagement.dto.IncidentResponseDto;
 import com.pareidolia.incidentmanagement.dto.ReclassifyIncidentRequestDto;
 import com.pareidolia.incidentmanagement.dto.ResolveIncidentRequestDto;
+import com.pareidolia.incidentmanagement.dto.ResolutionFeedbackRequestDto;
 import com.pareidolia.incidentmanagement.dto.ReviewIncidentRequestDto;
 import com.pareidolia.incidentmanagement.dto.UpdateEvidenceReferenceRequestDto;
 import com.pareidolia.incidentmanagement.dto.UpdateInvestigationRequestDto;
@@ -44,6 +45,8 @@ public interface IncidentService {
     IncidentResponseDto resolveIncident(Long id, ResolveIncidentRequestDto request);
 
     IncidentResponseDto validateIncident(Long id, ValidateIncidentRequestDto request);
+
+    IncidentResponseDto submitResolutionFeedback(Long id, ResolutionFeedbackRequestDto request);
 
     IncidentResponseDto closeIncident(Long id, CloseIncidentRequestDto request);
 
