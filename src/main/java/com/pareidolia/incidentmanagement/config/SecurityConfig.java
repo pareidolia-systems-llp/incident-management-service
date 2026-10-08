@@ -13,6 +13,8 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
@@ -29,8 +31,13 @@ public class SecurityConfig {
             GoogleWorkspaceOidcUserService googleWorkspaceOidcUserService,
             GoogleAuthenticationSuccessHandler googleAuthenticationSuccessHandler,
             GoogleAuthenticationFailureHandler googleAuthenticationFailureHandler,
-            OAuth2AuthorizedClientRepository oauth2AuthorizedClientRepository
+            OAuth2AuthorizedClientRepository oauth2AuthorizedClientRepository,
+            ClientRegistrationRepository clientRegistrationRepository
     ) throws Exception {
+        DefaultOAuth2AuthorizationRequestResolver authorizationRequestResolver =
+                new DefaultOAuth2AuthorizationRequestResolver(clientRegistrationRepository, "/oauth2/authorization");
+        authorizationRequestResolver.setAuthorizationRequestCustomizer(builder ->
+                builder.additionalParameters(parameters -> parameters.put("prompt", "select_account")));
         http
                 .cors(Customizer.withDefaults())
                 .csrf(csrf -> csrf.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
@@ -46,6 +53,7 @@ public class SecurityConfig {
                         )
                 )
                 .oauth2Login(oauth2 -> oauth2
+                        .authorizationEndpoint(endpoint -> endpoint.authorizationRequestResolver(authorizationRequestResolver))
                         .authorizedClientRepository(oauth2AuthorizedClientRepository)
                         .userInfoEndpoint(userInfo -> userInfo.oidcUserService(googleWorkspaceOidcUserService))
                         .successHandler(googleAuthenticationSuccessHandler)
