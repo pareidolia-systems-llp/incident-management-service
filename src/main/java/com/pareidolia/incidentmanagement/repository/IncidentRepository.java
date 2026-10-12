@@ -8,6 +8,9 @@ import java.util.List;
 
 public interface IncidentRepository extends JpaRepository<Incident, Long> {
 
+    List<Incident> findByReportedAtGreaterThanEqualAndReportedAtLessThanOrderByReportedAtAscIdAsc(
+            java.time.LocalDateTime start, java.time.LocalDateTime end);
+
     Optional<Incident> findByIncidentNumber(String incidentNumber);
 
     List<Incident> findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(String reportedBy);

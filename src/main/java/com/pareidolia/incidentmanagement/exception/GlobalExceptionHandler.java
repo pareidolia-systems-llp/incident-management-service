@@ -17,6 +17,17 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(InvalidRequestException.class)
+    public ResponseEntity<ApiErrorResponse> handleInvalidRequest(InvalidRequestException exception, HttpServletRequest request) {
+        return buildErrorResponse(HttpStatus.BAD_REQUEST, exception.getMessage(), request, Map.of());
+    }
+
+    @ExceptionHandler(org.springframework.web.multipart.MultipartException.class)
+    public ResponseEntity<ApiErrorResponse> handleMultipartFailure(HttpServletRequest request) {
+        return buildErrorResponse(HttpStatus.BAD_REQUEST,
+                "Upload up to 5 PNG or JPEG images, no larger than 5 MB each.", request, Map.of());
+    }
+
     @ExceptionHandler(IncidentNotFoundException.class)
     public ResponseEntity<ApiErrorResponse> handleIncidentNotFound(
             IncidentNotFoundException exception,

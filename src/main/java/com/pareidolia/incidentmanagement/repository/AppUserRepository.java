@@ -7,5 +7,7 @@ import java.util.Optional;
 
 public interface AppUserRepository extends JpaRepository<AppUser, Long> {
 
+    java.util.List<AppUser> findByEmailIn(java.util.Collection<String> emails);
+
     Optional<AppUser> findByEmail(String email);
 }
