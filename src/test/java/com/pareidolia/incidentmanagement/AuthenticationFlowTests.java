@@ -47,9 +47,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class AuthenticationFlowTests {
     @Configuration
     @EnableWebMvc
-    @Import({SecurityConfig.class, AuthController.class})
+    @Import({SecurityConfig.class, AuthController.class,
+            com.pareidolia.incidentmanagement.controller.IncidentAttachmentController.class})
     static class Config {
         @Bean AppUserService users() { return mock(AppUserService.class); }
+        @Bean com.pareidolia.incidentmanagement.service.IncidentAttachmentService attachments() {
+            return mock(com.pareidolia.incidentmanagement.service.IncidentAttachmentService.class);
+        }
         @Bean GoogleWorkspaceOidcUserService oidcUsers() { return mock(GoogleWorkspaceOidcUserService.class); }
         @Bean GoogleAuthenticationSuccessHandler success(AppUserService users) {
             return new GoogleAuthenticationSuccessHandler(users, "http://frontend.test");
@@ -129,7 +133,24 @@ class AuthenticationFlowTests {
         mvc.perform(get("/api/auth/me")).andExpect(status().isUnauthorized())
                 .andExpect(header().doesNotExist("Location"));
         mvc.perform(get("/api/incidents")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/reports/incidents/monthly?year=2026&month=10")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/incidents/1/attachments")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/incidents/1/attachments/1")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/auth/csrf")).andExpect(status().isOk());
+    }
+
+    @Test
+    void multipartUploadRequiresSessionAndValidCsrf() throws Exception {
+        var session = authenticatedSession();
+        var file = new org.springframework.mock.web.MockMultipartFile("files", "test.png", "image/png", new byte[]{1});
+        mvc.perform(multipart("/api/incidents/1/attachments").file(file).session(session))
+                .andExpect(status().isForbidden());
+        var response = mvc.perform(get("/api/auth/csrf").session(session)).andReturn().getResponse();
+        var csrf = JsonMapper.builder().build().readTree(response.getContentAsString());
+        mvc.perform(multipart("/api/incidents/1/attachments").file(file).session(session)
+                .cookie(response.getCookie("XSRF-TOKEN"))
+                .header(csrf.get("headerName").asText(), csrf.get("token").asText()))
+                .andExpect(status().isCreated());
     }
 
     @Test
