@@ -29,6 +29,7 @@ services:
       - /etc/alloy/config.alloy
     ports:
       - "127.0.0.1:12345:12345"
+      - "127.0.0.1:12347:12347"
     volumes:
       - ./alloy-config.alloy:/etc/alloy/config.alloy:ro
       # Relative to this Compose file, ../../logs is the repository's logs directory.

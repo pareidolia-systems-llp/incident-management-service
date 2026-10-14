@@ -94,6 +94,64 @@ Timestamps in the log text are preserved, but Loki uses ingestion time. Existing
 lines therefore appear near the first stack startup time, even when their text
 contains older timestamps. Alloy resumes from persisted positions on later runs.
 
+## Frontend Faro logs
+
+React browser -> Faro Web SDK -> Alloy `faro.receiver.incident_management_ui`
+-> the existing Loki writer -> Loki -> Grafana. The Spring Boot file pipeline
+continues unchanged. No Session Replay, Grafana Cloud, or trace storage is configured.
+
+Collector URL: <http://127.0.0.1:12347/collect>. Alloy listens on `0.0.0.0:12347`
+inside its container; Docker publishes only `127.0.0.1:12347:12347` on the host.
+CORS allows exactly `http://localhost:5173` and `http://127.0.0.1:5173`.
+Connection metadata is disabled (`include_metadata = false`); added labels are
+the fixed `application="incident-management-ui"` and `environment="dev"`.
+Browser-specific values are not configured as labels.
+
+After configuration changes, run from this directory:
+
+```powershell
+docker compose config
+docker compose up -d --no-deps alloy
+docker compose ps
+docker compose port alloy 12347
+docker compose logs --tail=100 alloy
+Invoke-RestMethod http://127.0.0.1:12345/-/ready
+```
+
+Check collector reachability and browser preflight for each allowed origin:
+
+```powershell
+foreach ($origin in @('http://localhost:5173', 'http://127.0.0.1:5173')) {
+    $response = Invoke-WebRequest -Method Options -Uri http://127.0.0.1:12347/collect -Headers @{
+        Origin = $origin
+        'Access-Control-Request-Method' = 'POST'
+        'Access-Control-Request-Headers' = 'content-type'
+    }
+    $response.StatusCode
+    $response.Headers['Access-Control-Allow-Origin']
+}
+```
+
+Expect a successful response with `Access-Control-Allow-Origin` equal to the
+requested origin. A preflight verifies reachability/CORS, not log ingestion.
+`/collect` accepts Faro POST payloads; opening it as a normal browser page is
+not an ingestion test. Open <http://127.0.0.1:12345> and inspect
+`faro.receiver.incident_management_ui` for component health.
+
+Once Alloy is ready, manually start Vite in the frontend repository with its
+existing Faro enablement setting and collector URL above. Open the app at one
+of the two allowed origins (Vite must stay on port 5173). In browser DevTools,
+check Network for successful POSTs to `/collect` without CORS errors. Use the
+app's existing Faro instrumentation to emit a log/event, then open Grafana
+Explore, select **Loki**, choose **Last 15 minutes**, and run:
+
+```logql
+{application="incident-management-ui", environment="dev"}
+```
+
+Allow a few seconds for batching. The frontend is not started or restarted by
+this stack. CORS is a browser restriction, not authentication for local clients.
+
 ## Verify ingestion
 
 From this directory:
@@ -143,6 +201,7 @@ anonymous Editor access.
 
 ## References
 
+- [Alloy Faro receiver](https://grafana.com/docs/alloy/latest/reference/components/faro/faro.receiver/)
 - [Loki filesystem configuration](https://grafana.com/docs/loki/latest/configure/examples/configuration-examples/)
 - [Alloy file source and saved positions](https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.file/)
 - [Grafana initial sign-in](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/)
