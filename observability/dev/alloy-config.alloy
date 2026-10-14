@@ -1,0 +1,29 @@
+logging {
+  level = "info"
+}
+
+loki.source.file "incident_management" {
+  targets = [{
+    __path__    = "/var/log/incident-management/incident-management.log",
+    application = "incident-management-service",
+    environment = "dev",
+  }]
+  // Read existing lines on the first run; persisted positions resume later runs.
+  tail_from_end = false
+  forward_to = [loki.relabel.incident_management.receiver]
+}
+
+loki.relabel "incident_management" {
+  // Drop the automatic filename label; retain only these fixed labels.
+  rule {
+    action = "labelkeep"
+    regex = "application|environment"
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
