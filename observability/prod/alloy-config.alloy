@@ -1,0 +1,55 @@
+logging {
+  level = "info"
+}
+
+// Native Linux service: restrict collection at the journal reader itself.
+loki.source.journal "incident_management" {
+  matches = "_SYSTEMD_UNIT=incident-management.service"
+  max_age = "24h"
+  format_as_json = false
+  labels = {
+    application = "incident-management-service",
+    environment = "prod",
+  }
+  forward_to = [loki.relabel.incident_management.receiver]
+}
+
+loki.relabel "incident_management" {
+  // Remove the automatic job label and retain only fixed labels.
+  rule {
+    action = "labelkeep"
+    regex = "application|environment"
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+faro.receiver "incident_management_ui" {
+  server {
+    listen_address = "127.0.0.1"
+    listen_port = 12347
+    cors_allowed_origins = ["https://incident.pareidolia.in"]
+    include_metadata = false
+    max_allowed_payload_size = "1MiB"
+    rate_limiting {
+      enabled = true
+      rate = 10
+      burst_size = 20
+    }
+  }
+  extra_log_labels = {
+    application = "incident-management-ui",
+    environment = "prod",
+  }
+  sourcemaps {
+    download = false
+  }
+  output {
+    logs = [loki.write.local.receiver]
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:3100/loki/api/v1/push"
+  }
+}
