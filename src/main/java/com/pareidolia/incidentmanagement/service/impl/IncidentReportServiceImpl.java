@@ -18,6 +18,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.YearMonth;
 import java.util.*;
 import java.util.function.Function;
@@ -75,23 +77,52 @@ public class IncidentReportServiceImpl implements IncidentReportService {
     @Override
     @Transactional(readOnly = true)
     public byte[] monthly(int year, int month) {
+        return report(year, month, null, null, null, null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public byte[] report(Integer year, Integer month, LocalDate fromDate, LocalTime fromTime,
+                         LocalDate toDate, LocalTime toTime) {
         var actor = users.getAuthenticatedUser();
         if (actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN) {
             throw new AccessDeniedException("Access denied.");
         }
-        if (year < 1900 || year > 9998 || month < 1 || month > 12) {
-            throw new InvalidRequestException("Select a year from 1900 to 9998 and a month from 1 to 12.");
+        LocalDateTime start, end;
+        boolean includeEnd = false;
+        boolean range = fromDate != null || toDate != null || fromTime != null || toTime != null;
+        if (range) {
+            if (year != null || month != null || fromDate == null || toDate == null) {
+                throw new InvalidRequestException("Select either a month or both From Date and To Date. Times require dates.");
+            }
+            if (fromDate.getYear() < 1900 || fromDate.getYear() > 9998
+                    || toDate.getYear() < 1900 || toDate.getYear() > 9998) {
+                throw new InvalidRequestException("Select dates from 1900 to 9998.");
+            }
+            start = fromDate.atTime(fromTime == null ? LocalTime.MIDNIGHT : fromTime);
+            // Whole end days use next-midnight exclusive: no fractional-second precision assumptions.
+            // Explicit times are inclusive exact boundaries, not rounded to the end of the minute.
+            end = toTime == null ? toDate.plusDays(1).atStartOfDay() : toDate.atTime(toTime);
+            includeEnd = toTime != null;
+            if (fromDate.isAfter(toDate) || start.isAfter(end) || (!includeEnd && start.equals(end))) {
+                throw new InvalidRequestException("From date/time must be on or before To date/time.");
+            }
+        } else {
+            if (year == null || month == null || year < 1900 || year > 9998 || month < 1 || month > 12) {
+                throw new InvalidRequestException("Select a year from 1900 to 9998 and a month from 1 to 12.");
+            }
+            YearMonth period = YearMonth.of(year, month);
+            start = period.atDay(1).atStartOfDay();
+            end = period.plusMonths(1).atDay(1).atStartOfDay();
         }
-        YearMonth period = YearMonth.of(year, month);
-        LocalDateTime start = period.atDay(1).atStartOfDay(), end = period.plusMonths(1).atDay(1).atStartOfDay();
-        var rows = incidents.findByReportedAtGreaterThanEqualAndReportedAtLessThanOrderByReportedAtAscIdAsc(start, end);
+        var rows = incidents.findForReport(start, end, includeEnd);
         Map<String, String> names = new HashMap<>();
         if (!rows.isEmpty()) {
             appUsers.findByEmailIn(rows.stream().map(Incident::getReportedBy).distinct().toList())
                     .forEach(user -> names.put(user.getEmail().toLowerCase(Locale.ROOT), user.getDisplayName()));
         }
         // One range query per sheet; no attachment entities or BLOBs are fetched.
-        var events = history.findForReport(start, end);
+        var events = history.findForReport(start, end, includeEnd);
         try (var workbook = new XSSFWorkbook(); var output = new ByteArrayOutputStream()) {
             var writer = new ReportWriter(workbook);
             Sheet sheet = writer.sheet("Incidents", COLUMNS.stream().map(Column::label).toList());
@@ -115,10 +146,10 @@ public class IncidentReportServiceImpl implements IncidentReportService {
                 }
             }
             workbook.write(output);
-            log.info("MONTHLY_INCIDENT_REPORT_EXPORTED actor={} period={}", actor.getEmail(), period);
+            log.info("INCIDENT_REPORT_EXPORTED actor={} start={} end={} includeEnd={}", actor.getEmail(), start, end, includeEnd);
             return output.toByteArray();
         } catch (IOException exception) {
-            throw new IllegalStateException("Monthly report could not be generated.", exception);
+            throw new IllegalStateException("Incident report could not be generated.", exception);
         }
     }
 

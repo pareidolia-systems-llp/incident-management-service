@@ -22,6 +22,12 @@ public class IncidentController {
 
     private final IncidentService incidentService;
 
+    @PostMapping("/{id}/work-notes")
+    public ResponseEntity<IncidentResponseDto> addWorkNote(@PathVariable Long id,
+            @Valid @RequestBody AddWorkNoteRequestDto request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(incidentService.addWorkNote(id, request));
+    }
+
     @PostMapping
     public ResponseEntity<IncidentResponseDto> createIncident(@Valid @RequestBody CreateIncidentRequestDto request) {
         return ResponseEntity.status(HttpStatus.CREATED).body(incidentService.createIncident(request));

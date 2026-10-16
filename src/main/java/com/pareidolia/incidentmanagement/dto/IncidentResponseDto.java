@@ -31,6 +31,9 @@ public class IncidentResponseDto {
     private Priority priority;
     private String assignedOwner;
     private IncidentStatus status;
+    private boolean issueStillPersists;
+    private LocalDateTime issueStillPersistsAt;
+    private String issueStillPersistsReportedBy;
     private String investigationDetails;
     private String rootCause;
     private String actionsTaken;

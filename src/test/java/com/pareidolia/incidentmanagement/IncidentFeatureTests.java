@@ -1,6 +1,7 @@
 package com.pareidolia.incidentmanagement;
 
 import com.pareidolia.incidentmanagement.controller.*;
+import com.pareidolia.incidentmanagement.dto.*;
 import com.pareidolia.incidentmanagement.entity.*;
 import com.pareidolia.incidentmanagement.enums.*;
 import com.pareidolia.incidentmanagement.exception.*;
@@ -56,7 +57,8 @@ class IncidentFeatureTests {
     @BeforeEach void setup() {
         actor(AppUserRole.ADMIN, "owner@pareidolia.in");
         mvc = MockMvcBuilders.standaloneSetup(new IncidentAttachmentController(attachmentService),
-                new IncidentReportController(reportService)).setControllerAdvice(new GlobalExceptionHandler()).build();
+                new IncidentReportController(reportService), new IncidentController(incidentService))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 
     void actor(AppUserRole role, String email) {
@@ -78,6 +80,138 @@ class IncidentFeatureTests {
         ImageIO.write(new BufferedImage(3, 3, BufferedImage.TYPE_INT_RGB), format, bytes);
         // Filename and claimed MIME must not control detected type.
         return new MockMultipartFile("files", "../../error\r\n.html", "text/html", bytes.toByteArray());
+    }
+
+    @Test
+    void reporterFeedbackThenScreenshotUsesNormalAttachmentHistory() throws Exception {
+        var ticket = incident("FEEDBACK-IMAGE", "2026-10-01T00:00:00");
+        ticket.setStatus(IncidentStatus.RESOLVED);
+        incidents.saveAndFlush(ticket);
+        actor(AppUserRole.REPORTER, ticket.getReportedBy());
+        mvc.perform(post("/api/incidents/{id}/resolution-feedback", ticket.getId())
+                .contentType("application/json").content("{\"feedback\":\"Still disconnected\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("IN_PROGRESS"));
+        mvc.perform(multipart("/api/incidents/{id}/attachments", ticket.getId()).file(image("png")))
+                .andExpect(status().isCreated());
+        entityManager.flush(); entityManager.clear();
+        assertThat(incidents.findById(ticket.getId()).orElseThrow().getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        var events = history.findByIncidentIdOrderByChangedAtAscIdAsc(ticket.getId());
+        assertThat(events).extracting(e -> e.getActionType()).containsExactly(
+                HistoryActionType.RESOLUTION_NOT_ACCEPTED, HistoryActionType.STATUS_CHANGED, HistoryActionType.ATTACHMENT_ADDED);
+        mvc.perform(get("/api/incidents/{id}/attachments", ticket.getId()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = AppUserRole.class, names = {"IT_HANDLER", "ADMIN"})
+    void reassessmentsRequireReasonAndRetainAuditedChanges(AppUserRole role) throws Exception {
+        var ticket = incident("REASSESS", "2026-10-01T00:00:00");
+        actor(role, "operator@pareidolia.in");
+        for (String field : List.of("severity", "priority")) {
+            for (String reasonJson : List.of("", ",\"remarks\":\"\"", ",\"remarks\":\"   \"")) {
+                mvc.perform(post("/api/incidents/{id}/" + field, ticket.getId())
+                        .contentType("application/json").content("{\"" + field + "\":\"HIGH\"" + reasonJson + "}"))
+                        .andExpect(status().isBadRequest()).andExpect(jsonPath("$.fieldErrors.remarks").exists());
+            }
+            assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(ticket.getId()))
+                    .noneMatch(e -> e.getActionType().name().equals(field.toUpperCase() + "_CHANGED"));
+            mvc.perform(post("/api/incidents/{id}/" + field, ticket.getId())
+                    .contentType("application/json").content("{\"" + field + "\":\"HIGH\",\"remarks\":\"Business process blocked\"}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$." + field).value("HIGH"));
+            var events = history.findByIncidentIdOrderByChangedAtAscIdAsc(ticket.getId());
+            assertThat(events).filteredOn(e -> e.getActionType().name().equals(field.toUpperCase() + "_CHANGED"))
+                    .singleElement().satisfies(e -> {
+                        assertThat(e.getOldValue()).isEqualTo("LOW");
+                        assertThat(e.getNewValue()).isEqualTo("HIGH");
+                        assertThat(e.getRemarks()).isEqualTo("Business process blocked");
+                        assertThat(e.getChangedBy()).isEqualTo("operator@pareidolia.in");
+                        assertThat(e.getChangedAt()).isNotNull();
+                    });
+        }
+        assertThat(incidents.findById(ticket.getId()).orElseThrow().getStatus()).isEqualTo(IncidentStatus.ASSIGNED);
+    }
+
+    @ParameterizedTest @EnumSource(AppUserRole.class)
+    void workNotePermissionsPersistenceAndIdentity(AppUserRole role) throws Exception {
+        var ticket = incident("NOTE", "2026-10-01T00:00:00");
+        actor(role, "operator@pareidolia.in");
+        boolean permitted = role == AppUserRole.ADMIN || role == AppUserRole.IT_HANDLER;
+        mvc.perform(post("/api/incidents/{id}/work-notes", ticket.getId())
+                .contentType("application/json").content("{\"remarks\":\"  Checked VPN logs.  \"}"))
+                .andExpect(status().is(permitted ? 201 : 403));
+        entityManager.flush(); entityManager.clear();
+        var events = history.findByIncidentIdOrderByChangedAtAscIdAsc(ticket.getId());
+        assertThat(events).hasSize(permitted ? 1 : 0);
+        if (permitted) {
+            assertThat(events.get(0).getActionType()).isEqualTo(HistoryActionType.WORK_NOTE);
+            assertThat(events.get(0).getRemarks()).isEqualTo("Checked VPN logs.");
+            assertThat(events.get(0).getChangedBy()).isEqualTo("operator@pareidolia.in");
+            assertThat(events.get(0).getChangedAt()).isNotNull();
+            assertThat(events.get(0).getOldValue()).isNull();
+            assertThat(events.get(0).getNewValue()).isNull();
+        }
+        assertThat(incidents.findById(ticket.getId()).orElseThrow().getStatus()).isEqualTo(IncidentStatus.ASSIGNED);
+    }
+
+    @Test void workNoteValidationAndClosedIncidentRules() throws Exception {
+        var ticket = incident("NOTE-VALIDATION", "2026-10-01T00:00:00");
+        for (String note : List.of("   ", "x".repeat(8001))) {
+            mvc.perform(post("/api/incidents/{id}/work-notes", ticket.getId()).contentType("application/json")
+                    .content("{\"remarks\":\"" + note + "\"}")).andExpect(status().isBadRequest());
+        }
+        ticket.setStatus(IncidentStatus.CLOSED); incidents.saveAndFlush(ticket);
+        mvc.perform(post("/api/incidents/{id}/work-notes", ticket.getId()).contentType("application/json")
+                .content("{\"remarks\":\"Checked logs\"}")).andExpect(status().isConflict());
+        assertThat(history.count()).isZero();
+    }
+
+    @Test void reporterRejectionAttentionSurvivesWorkAndClearsOnResolutionWithoutLosingHistory() {
+        var ticket = incident("REOPEN", "2026-10-01T00:00:00");
+        var ordinary = incident("ORDINARY", "2026-10-01T00:00:00");
+        ordinary.setStatus(IncidentStatus.IN_PROGRESS); incidents.saveAndFlush(ordinary);
+        var resolve = new ResolveIncidentRequestDto(); resolve.setResolutionDetails("VPN profile recreated");
+        incidentService.resolveIncident(ticket.getId(), resolve);
+        var feedback = new ResolutionFeedbackRequestDto(); feedback.setFeedback("Still disconnected");
+        actor(AppUserRole.IT_HANDLER, "handler@pareidolia.in");
+        assertThatThrownBy(() -> incidentService.submitResolutionFeedback(ticket.getId(), feedback))
+                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+        actor(AppUserRole.REPORTER, "owner@pareidolia.in");
+        var reopened = incidentService.submitResolutionFeedback(ticket.getId(), feedback);
+        assertThat(reopened.getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        assertThat(reopened.isIssueStillPersists()).isTrue();
+        assertThat(reopened.getIssueStillPersistsReportedBy()).isEqualTo("owner@pareidolia.in");
+        assertThat(reopened.getIssueStillPersistsAt()).isNotNull();
+        actor(AppUserRole.IT_HANDLER, "handler@pareidolia.in");
+        incidentService.addWorkNote(ticket.getId(), new AddWorkNoteRequestDto("Rechecked gateway logs"));
+        var investigation = new UpdateInvestigationRequestDto(); investigation.setInvestigationDetails("Expired certificate");
+        assertThat(incidentService.updateInvestigation(ticket.getId(), investigation).isIssueStillPersists()).isTrue();
+        assertThat(incidentService.getAllIncidents().stream().filter(IncidentResponseDto::isIssueStillPersists)).hasSize(1);
+        assertThat(incidentService.getIncident(ordinary.getId()).isIssueStillPersists()).isFalse();
+        var resolved = incidentService.resolveIncident(ticket.getId(), resolve);
+        assertThat(resolved.getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(resolved.isIssueStillPersists()).isFalse();
+        assertThat(resolved.getIssueStillPersistsAt()).isNull();
+        assertThat(incidentService.getAllIncidents()).noneMatch(IncidentResponseDto::isIssueStillPersists);
+        assertThat(incidentService.getIncidentHistory(ticket.getId())).anySatisfy(event -> {
+            assertThat(event.getActionType()).isEqualTo(HistoryActionType.RESOLUTION_NOT_ACCEPTED);
+            assertThat(event.getRemarks()).contains("Still disconnected");
+        });
+        actor(AppUserRole.REPORTER, "other@pareidolia.in");
+        assertThatThrownBy(() -> incidentService.getIncidentHistory(ticket.getId()))
+                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+    }
+
+    @Test void historyAndAttentionUseIdTieBreakerForEqualTimestamps() {
+        var ticket = incident("TIE", "2026-10-01T00:00:00");
+        ticket.setStatus(IncidentStatus.IN_PROGRESS); incidents.saveAndFlush(ticket);
+        for (var action : List.of(HistoryActionType.RESOLUTION_NOT_ACCEPTED, HistoryActionType.INCIDENT_RESOLVED)) {
+            var event = new IncidentHistory(); event.setIncident(ticket); event.setActionType(action);
+            event.setChangedBy("owner@pareidolia.in"); event.setChangedAt(LocalDateTime.parse("2026-10-01T01:00:00"));
+            history.saveAndFlush(event);
+        }
+        assertThat(incidentService.getIncident(ticket.getId()).isIssueStillPersists()).isFalse();
+        assertThat(incidentService.getIncidentHistory(ticket.getId())).extracting(IncidentHistoryResponseDto::getActionType)
+                .containsExactly(HistoryActionType.RESOLUTION_NOT_ACCEPTED, HistoryActionType.INCIDENT_RESOLVED);
     }
 
     @Test void reportUsesHalfOpenReportedDateRangeAndProducesReadableWorkbook() throws Exception {
@@ -124,6 +258,84 @@ class IncidentFeatureTests {
                 "year=9999&month=1", "year=no&month=1", "year=2026")) {
             mvc.perform(get("/api/reports/incidents/monthly?" + query)).andExpect(status().isBadRequest());
         }
+    }
+
+    private List<String> reportTickets(String query) throws Exception {
+        byte[] bytes = mvc.perform(get("/api/reports/incidents/monthly?" + query))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andReturn().getResponse().getContentAsByteArray();
+        try (var workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
+            var sheet = workbook.getSheet("Incidents");
+            List<String> tickets = new ArrayList<>();
+            for (int row = 1; row <= sheet.getLastRowNum(); row++) tickets.add(sheet.getRow(row).getCell(0).getStringCellValue());
+            return tickets;
+        }
+    }
+
+    @Test void dateOnlyReportIncludesEntireSelectedDaysAndFullHistoryOfMatchingTickets() throws Exception {
+        incident("BEFORE-RANGE", "2026-09-30T23:59:59.999999");
+        var first = incident("RANGE-START", "2026-10-01T00:00:00");
+        incident("RANGE-END", "2026-10-15T23:59:59.999999");
+        incident("AFTER-RANGE", "2026-10-16T00:00:00");
+        var event = new IncidentHistory(); event.setIncident(first); event.setActionType(HistoryActionType.WORK_NOTE);
+        event.setRemarks("Later work is still included for matching incidents"); event.setChangedBy("owner@pareidolia.in");
+        event.setChangedAt(LocalDateTime.parse("2026-10-20T12:00:00")); history.saveAndFlush(event);
+        String query = "fromDate=2026-10-01&toDate=2026-10-15";
+        assertThat(reportTickets(query)).containsExactly("RANGE-START", "RANGE-END");
+        byte[] bytes = mvc.perform(get("/api/reports/incidents/monthly?" + query)).andExpect(status().isOk())
+                .andExpect(header().string("Content-Disposition", "attachment; filename=\"incident-report-2026-10-01-to-2026-10-15.xlsx\""))
+                .andReturn().getResponse().getContentAsByteArray();
+        try (var workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
+            assertThat(workbook.getSheet("Lifecycle History").getLastRowNum()).isEqualTo(1);
+            assertThat(workbook.getSheet("Lifecycle History").getRow(1).getCell(6).getStringCellValue())
+                    .isEqualTo(event.getRemarks());
+        }
+        assertThat(history.count()).isEqualTo(1);
+    }
+
+    @Test void sameDayTimesUseExactInclusiveBoundariesAndPermitEqualEndpoints() throws Exception {
+        incident("BEFORE-TIME", "2026-10-15T08:59:59.999999");
+        incident("TIME-START", "2026-10-15T09:00:00");
+        incident("TIME-END", "2026-10-15T17:30:00");
+        incident("AFTER-TIME", "2026-10-15T17:30:00.000001");
+        assertThat(reportTickets("fromDate=2026-10-15&fromTime=09:00&toDate=2026-10-15&toTime=17:30"))
+                .containsExactly("TIME-START", "TIME-END");
+        assertThat(reportTickets("fromDate=2026-10-15&fromTime=09:00&toDate=2026-10-15&toTime=09:00"))
+                .containsExactly("TIME-START");
+    }
+
+    @Test void multiDayTimesAndIndependentlyOptionalTimesAreSupported() throws Exception {
+        incident("DAY-START", "2026-10-14T00:00:00");
+        incident("AFTERNOON", "2026-10-14T16:00:00");
+        incident("NEXT-MORNING", "2026-10-15T10:00:00");
+        incident("LAST-FRACTION", "2026-10-15T23:59:59.999999");
+        assertThat(reportTickets("fromDate=2026-10-14&fromTime=16:00&toDate=2026-10-15&toTime=10:00"))
+                .containsExactly("AFTERNOON", "NEXT-MORNING");
+        assertThat(reportTickets("fromDate=2026-10-14&fromTime=16:00&toDate=2026-10-15"))
+                .containsExactly("AFTERNOON", "NEXT-MORNING", "LAST-FRACTION");
+        assertThat(reportTickets("fromDate=2026-10-14&toDate=2026-10-15&toTime=10:00"))
+                .containsExactly("DAY-START", "AFTERNOON", "NEXT-MORNING");
+    }
+
+    @Test void reportRejectsInvalidOrAmbiguousRangesWithoutSwapping() throws Exception {
+        for (String query : List.of("fromDate=2026-10-16&toDate=2026-10-15",
+                "fromDate=2026-10-15&fromTime=17:30&toDate=2026-10-15&toTime=09:00")) {
+            mvc.perform(get("/api/reports/incidents/monthly?" + query)).andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.message").value("From date/time must be on or before To date/time."));
+        }
+        for (String query : List.of("fromTime=09:00", "fromDate=2026-10-15", "toDate=2026-10-15",
+                "year=2026&month=10&fromDate=2026-10-01&toDate=2026-10-15",
+                "fromDate=2026-02-30&toDate=2026-03-01", "fromDate=2026-10-15&toDate=2026-10-15&toTime=25:00",
+                "fromDate=1899-12-31&toDate=2026-10-15", "fromDate=2026-10-15&toDate=9999-01-01")) {
+            mvc.perform(get("/api/reports/incidents/monthly?" + query)).andExpect(status().isBadRequest());
+        }
+    }
+
+    @ParameterizedTest @EnumSource(AppUserRole.class)
+    void rangeReportsKeepExistingRoleRestrictions(AppUserRole role) throws Exception {
+        actor(role, "owner@pareidolia.in");
+        mvc.perform(get("/api/reports/incidents/monthly?fromDate=2026-10-15&toDate=2026-10-15"))
+                .andExpect(status().is(role == AppUserRole.ADMIN || role == AppUserRole.IT_HANDLER ? 200 : 403));
     }
 
     @Test void longDescriptionsArePreservedWithoutWorkbookFailure() throws Exception {

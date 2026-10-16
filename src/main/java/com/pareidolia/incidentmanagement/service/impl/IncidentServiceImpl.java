@@ -81,7 +81,7 @@ public class IncidentServiceImpl implements IncidentService {
                 SYSTEM_ACTOR,
                 "Automatically assigned to the configured default IT owner."
         );
-        return incidentMapper.toResponseDto(savedIncident);
+        return toResponseDto(savedIncident);
     }
 
     @Override
@@ -90,7 +90,7 @@ public class IncidentServiceImpl implements IncidentService {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
         ensureCanViewIncident(actor, incident);
-        return incidentMapper.toResponseDto(incident);
+        return toResponseDto(incident);
     }
 
     @Override
@@ -100,7 +100,7 @@ public class IncidentServiceImpl implements IncidentService {
         Incident incident = incidentRepository.findByIncidentNumber(incidentNumber)
                 .orElseThrow(() -> new IncidentNotFoundException("Incident not found with number: " + incidentNumber));
         ensureCanViewIncident(actor, incident);
-        return incidentMapper.toResponseDto(incident);
+        return toResponseDto(incident);
     }
 
     @Override
@@ -110,9 +110,9 @@ public class IncidentServiceImpl implements IncidentService {
         List<Incident> incidents = actor.getRole() == AppUserRole.REPORTER
                 ? incidentRepository.findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(actor.getEmail())
                 : incidentRepository.findAllByOrderByCreatedAtDescIdDesc();
-        return incidents.stream()
-                .map(incidentMapper::toResponseDto)
-                .toList();
+        var responses = incidents.stream().map(incidentMapper::toResponseDto).toList();
+        enrichAttention(responses);
+        return responses;
     }
 
     @Override
@@ -132,7 +132,7 @@ public class IncidentServiceImpl implements IncidentService {
             transitionStatus(incident, IncidentStatus.ASSIGNED, actor.getEmail(), request.getRemarks());
         }
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -156,7 +156,7 @@ public class IncidentServiceImpl implements IncidentService {
             transitionStatus(incident, IncidentStatus.IN_PROGRESS, actor.getEmail(), request.getRemarks());
         }
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -172,7 +172,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.ISSUE_TYPE_CHANGED, oldIssueType, enumValue(request.getIssueType()),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -188,7 +188,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.SEVERITY_CHANGED, oldSeverity, enumValue(request.getSeverity()),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -204,7 +204,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.PRIORITY_CHANGED, oldPriority, enumValue(request.getPriority()),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -221,7 +221,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.ESCALATED, oldEscalationDetails, request.getEscalationDetails(),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -237,7 +237,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.EVIDENCE_UPDATED, oldEvidenceReference, request.getEvidenceReference(),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -255,7 +255,7 @@ public class IncidentServiceImpl implements IncidentService {
                 actor.getEmail(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.RESOLVED, actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -274,7 +274,7 @@ public class IncidentServiceImpl implements IncidentService {
                 actor.getEmail(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.VALIDATED, actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -293,7 +293,7 @@ public class IncidentServiceImpl implements IncidentService {
                 IncidentStatus.RESOLVED.name(), IncidentStatus.IN_PROGRESS.name(), actor.getEmail(), remarks);
         transitionStatus(incident, IncidentStatus.IN_PROGRESS, actor.getEmail(), remarks);
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -310,7 +310,7 @@ public class IncidentServiceImpl implements IncidentService {
                 actor.getEmail(), request.getRemarks());
         transitionStatus(incident, IncidentStatus.CLOSED, actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -337,7 +337,7 @@ public class IncidentServiceImpl implements IncidentService {
         recordHistory(incident, HistoryActionType.INCIDENT_REVIEWED, oldReviewDetails, request.getReviewDetails(),
                 actor.getEmail(), request.getRemarks());
 
-        return incidentMapper.toResponseDto(incidentRepository.saveAndFlush(incident));
+        return toResponseDto(incidentRepository.saveAndFlush(incident));
     }
 
     @Override
@@ -346,9 +346,44 @@ public class IncidentServiceImpl implements IncidentService {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
         ensureCanViewIncident(actor, incident);
-        return incidentHistoryRepository.findByIncidentIdOrderByChangedAtDesc(id).stream()
+        return incidentHistoryRepository.findByIncidentIdOrderByChangedAtAscIdAsc(id).stream()
                 .map(incidentMapper::toHistoryResponseDto)
                 .toList();
+    }
+
+    @Override
+    @Transactional
+    public IncidentResponseDto addWorkNote(Long id, AddWorkNoteRequestDto request) {
+        AppUser actor = getAuthenticatedUser();
+        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
+        Incident incident = findIncident(id);
+        ensureCanViewIncident(actor, incident);
+        ensureNotClosed(incident, "add a work note to");
+        recordHistory(incident, HistoryActionType.WORK_NOTE, null, null,
+                actor.getEmail(), request.remarks().trim());
+        return toResponseDto(incident);
+    }
+
+    private IncidentResponseDto toResponseDto(Incident incident) {
+        IncidentResponseDto dto = incidentMapper.toResponseDto(incident);
+        enrichAttention(List.of(dto));
+        return dto;
+    }
+
+    private void enrichAttention(List<IncidentResponseDto> responses) {
+        if (responses.isEmpty()) return;
+        var byId = responses.stream().collect(java.util.stream.Collectors.toMap(IncidentResponseDto::getId, d -> d));
+        var events = incidentHistoryRepository.findLatestAttentionEvents(List.copyOf(byId.keySet()),
+                List.of(HistoryActionType.RESOLUTION_NOT_ACCEPTED, HistoryActionType.INCIDENT_RESOLVED));
+        for (IncidentHistory event : events) {
+            var dto = byId.get(event.getIncident().getId());
+            if (dto.getStatus() == IncidentStatus.IN_PROGRESS
+                    && event.getActionType() == HistoryActionType.RESOLUTION_NOT_ACCEPTED) {
+                dto.setIssueStillPersists(true);
+                dto.setIssueStillPersistsAt(event.getChangedAt());
+                dto.setIssueStillPersistsReportedBy(event.getChangedBy());
+            }
+        }
     }
 
     private Incident findIncident(Long id) {

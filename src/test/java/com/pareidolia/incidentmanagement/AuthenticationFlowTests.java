@@ -48,9 +48,13 @@ class AuthenticationFlowTests {
     @Configuration
     @EnableWebMvc
     @Import({SecurityConfig.class, AuthController.class,
+            com.pareidolia.incidentmanagement.controller.WorkLogController.class,
             com.pareidolia.incidentmanagement.controller.IncidentAttachmentController.class})
     static class Config {
         @Bean AppUserService users() { return mock(AppUserService.class); }
+        @Bean com.pareidolia.incidentmanagement.service.WorkLogService workLogs() {
+            return mock(com.pareidolia.incidentmanagement.service.WorkLogService.class);
+        }
         @Bean com.pareidolia.incidentmanagement.service.IncidentAttachmentService attachments() {
             return mock(com.pareidolia.incidentmanagement.service.IncidentAttachmentService.class);
         }
@@ -130,6 +134,7 @@ class AuthenticationFlowTests {
 
     @Test
     void unauthenticatedApiRequestsReturn401WithoutStartingOAuth() throws Exception {
+        mvc.perform(get("/api/work-logs")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/auth/me")).andExpect(status().isUnauthorized())
                 .andExpect(header().doesNotExist("Location"));
         mvc.perform(get("/api/incidents")).andExpect(status().isUnauthorized());
@@ -137,6 +142,20 @@ class AuthenticationFlowTests {
         mvc.perform(get("/api/incidents/1/attachments")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/incidents/1/attachments/1")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/auth/csrf")).andExpect(status().isOk());
+    }
+
+    @Test
+    void workLogCreationRequiresValidCsrf() throws Exception {
+        var session = authenticatedSession();
+        String payload = "{\"workedAt\":\"2026-10-15T10:00:00\",\"category\":\"OTHER\",\"summary\":\"Routine work\"}";
+        mvc.perform(post("/api/work-logs").session(session).contentType("application/json").content(payload))
+                .andExpect(status().isForbidden());
+        var response = mvc.perform(get("/api/auth/csrf").session(session)).andReturn().getResponse();
+        var csrf = JsonMapper.builder().build().readTree(response.getContentAsString());
+        mvc.perform(post("/api/work-logs").session(session).contentType("application/json").content(payload)
+                        .cookie(response.getCookie("XSRF-TOKEN"))
+                        .header(csrf.get("headerName").asText(), csrf.get("token").asText()))
+                .andExpect(status().isCreated());
     }
 
     @Test
