@@ -2,6 +2,7 @@ package com.pareidolia.incidentmanagement.dto;
 
 import com.pareidolia.incidentmanagement.enums.Severity;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -16,5 +17,6 @@ public class ChangeSeverityRequestDto {
     private Severity severity;
 
     @Size(max = 65535)
+    @NotBlank(message = "Provide a reason for reassessment.")
     private String remarks;
 }

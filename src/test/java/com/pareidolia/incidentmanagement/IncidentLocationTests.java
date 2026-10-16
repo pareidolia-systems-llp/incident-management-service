@@ -88,6 +88,31 @@ class IncidentLocationTests {
         repository.saveAndFlush(incident);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Server / Infrastructure", "Database", "Security / Endpoint", "Other",
+            "Network / Connectivity", "Software Installation", "Ransomware"})
+    void supportedCategoriesPersistWithoutChangingIssueType(String category) throws Exception {
+        var body = request();
+        body.put("category", category);
+        long id = create(body);
+        entityManager.clear();
+        var saved = repository.findById(id).orElseThrow();
+        assertThat(saved.getCategory()).isEqualTo(category);
+        assertThat(saved.getIssueType().name()).isEqualTo("IT_ISSUE");
+    }
+
+    @Test
+    void unsupportedCategoryIsRejectedBeforePersistence() throws Exception {
+        var body = request();
+        body.put("category", "Unsupported category");
+        long before = repository.count();
+        mvc.perform(post("/api/incidents").contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(body)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.category").exists());
+        assertThat(repository.count()).isEqualTo(before);
+    }
+
     private void authenticateAs(String email, AppUserRole role) {
         AppUser actor = new AppUser();
         actor.setEmail(email);
