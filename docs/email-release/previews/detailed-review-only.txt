@@ -1,0 +1,12 @@
+Subject: [New Incident] Synthetic VPN <script>alert(1)</script> & account issue | INC-2026-20261106-120000-ABCDEF12
+A new incident was created.
+Incident number: INC-2026-20261106-120000-ABCDEF12
+Incident title: Synthetic VPN <script>alert(1)</script> & account issue
+Submitted by: Synthetic <Reporter>
+Reported department: Operations (Annotation)
+Issue type: IT_ISSUE
+Severity: LOW
+Priority: HIGH
+Reported at: 2026-11-06T12:00
+Sign in to the incident management portal to review it.
+Open Incident Management Portal: https://portal.example.test/
