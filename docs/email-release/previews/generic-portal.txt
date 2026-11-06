@@ -1,0 +1,5 @@
+Subject: New incident created
+A new incident was created.
+Incident number: INC-2026-20261106-120000-ABCDEF12
+Sign in to the incident management portal to review it.
+Open Incident Management Portal: https://portal.example.test/

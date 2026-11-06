@@ -5,6 +5,23 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
 class IncidentManagementServiceApplicationTests {
+    @org.springframework.test.context.bean.override.mockito.MockitoBean
+    org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager authorizedClientManager;
+
+    @org.springframework.test.context.bean.override.mockito.MockitoBean
+    org.springframework.security.oauth2.client.endpoint.OAuth2AccessTokenResponseClient<org.springframework.security.oauth2.client.endpoint.OAuth2AuthorizationCodeGrantRequest> tokenClient;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    org.springframework.context.ApplicationContext context;
+
+    @Test
+    void emailReleaseContainsNoUnfinishedAdministrationOrAccessBeans() {
+        for (String name : java.util.List.of("incidentAccessActivationGuard", "incidentAccessPolicy",
+                "incidentAssignmentService", "employeeDirectoryService", "incidentSecurityAdministrationService")) {
+            org.assertj.core.api.Assertions.assertThat(context.containsBean(name)).as(name).isFalse();
+        }
+    }
+
 
 	@Test
 	void contextLoads() {

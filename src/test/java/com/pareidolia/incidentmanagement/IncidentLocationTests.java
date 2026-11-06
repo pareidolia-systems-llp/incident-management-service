@@ -513,7 +513,8 @@ class IncidentLocationTests {
                 mock(IncidentHistoryRepository.class),
                 new IncidentMapper(),
                 users,
-                "owner@example.test"
+                "owner@example.test",
+                mock(org.springframework.context.ApplicationEventPublisher.class)
         );
         MockMvc isolatedMvc = MockMvcBuilders.standaloneSetup(new IncidentController(isolatedService))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();

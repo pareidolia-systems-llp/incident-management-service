@@ -15,6 +15,8 @@ import com.pareidolia.incidentmanagement.repository.IncidentRepository;
 import com.pareidolia.incidentmanagement.service.IncidentService;
 import com.pareidolia.incidentmanagement.service.AppUserService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
+import com.pareidolia.incidentmanagement.notification.IncidentCreated;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,19 +39,22 @@ public class IncidentServiceImpl implements IncidentService {
     private final IncidentMapper incidentMapper;
     private final AppUserService appUserService;
     private final String defaultItOwner;
+    private final ApplicationEventPublisher events;
 
     public IncidentServiceImpl(
             IncidentRepository incidentRepository,
             IncidentHistoryRepository incidentHistoryRepository,
             IncidentMapper incidentMapper,
             AppUserService appUserService,
-            @Value("${app.default-it-owner}") String defaultItOwner
+            @Value("${app.default-it-owner}") String defaultItOwner,
+            ApplicationEventPublisher events
     ) {
         this.incidentRepository = incidentRepository;
         this.incidentHistoryRepository = incidentHistoryRepository;
         this.incidentMapper = incidentMapper;
         this.appUserService = appUserService;
         this.defaultItOwner = defaultItOwner.trim();
+        this.events = events;
     }
 
     @Override
@@ -81,6 +86,9 @@ public class IncidentServiceImpl implements IncidentService {
                 SYSTEM_ACTOR,
                 "Automatically assigned to the configured default IT owner."
         );
+        events.publishEvent(new IncidentCreated(savedIncident.getIncidentNumber(), savedIncident.getTitle(),
+                actor.getDisplayName(), savedIncident.getReporterDepartment(), savedIncident.getIssueType(),
+                savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt()));
         return toResponseDto(savedIncident);
     }
 
