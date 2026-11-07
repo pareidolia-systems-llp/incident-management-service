@@ -88,7 +88,9 @@ public class IncidentServiceImpl implements IncidentService {
         );
         events.publishEvent(new IncidentCreated(savedIncident.getIncidentNumber(), savedIncident.getTitle(),
                 actor.getDisplayName(), savedIncident.getReporterDepartment(), savedIncident.getIssueType(),
-                savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt()));
+                savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt(),
+                savedIncident.getDescription(), savedIncident.getAssignedOwner(), savedIncident.getStatus(),
+                savedIncident.getCreatedAt()));
         return toResponseDto(savedIncident);
     }
 

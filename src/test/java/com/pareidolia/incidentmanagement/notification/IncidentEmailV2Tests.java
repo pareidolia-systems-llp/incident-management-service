@@ -29,7 +29,7 @@ class IncidentEmailV2Tests {
     }
     @Test void approvedRendererEscapesHtmlAndStripsUnsafeSubjectCharacters() {
         var result=IncidentEmailTemplate.render(event(IssueType.IT_ISSUE),true);
-        assertThat(result.subject()).startsWith("[New Incident] Printer").endsWith(" | INC-2026-20261104-120000-ABCDEF12").doesNotContain("\r","\n");
+        assertThat(result.subject()).isEqualTo("New incident created");
         assertThat(result.html()).contains("&lt;script&gt;", "Trusted &lt;Reporter&gt;", "Ops &amp; Sales").doesNotContain("<script>");
         assertThat(result.plainText()).contains("Trusted <Reporter>","Reported department: Ops & Sales");
         assertThat(IncidentEmailTemplate.clean("x".repeat(1000)+"\u202e",120)).hasSize(120);

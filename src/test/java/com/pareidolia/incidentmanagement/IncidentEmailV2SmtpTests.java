@@ -28,7 +28,7 @@ import static org.mockito.Mockito.*;
 
 @DataJpaTest(properties={"spring.datasource.url=jdbc:h2:mem:smtp_capture_test;DB_CLOSE_DELAY=-1","spring.datasource.username=sa","spring.datasource.password=",
  "spring.jpa.hibernate.ddl-auto=create-drop","spring.jpa.show-sql=false","app.department-routing.enabled=false","app.notifications.in-app.enabled=false",
- "app.notifications.email.v2.enabled=true","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
+ "app.notifications.email.v2.enabled=true","app.notifications.email.v2.details-enabled=true","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
  "app.notifications.email.it-recipients=oversight@example.test,blocked@example.test","app.notifications.email.hr-recipients=oversight@example.test",
  "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test",
  "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test",
@@ -73,6 +73,10 @@ class IncidentEmailV2SmtpTests {
         var event=events.get(0);var saved=repository.findById(created.getId()).orElseThrow();
         assertThat(event.incidentNumber()).isEqualTo(saved.getIncidentNumber());
         assertThat(event.title()).isEqualTo(saved.getTitle());
+        assertThat(event.description()).isEqualTo(saved.getDescription());
+        assertThat(event.assignedHandler()).isEqualTo(saved.getAssignedOwner());
+        assertThat(event.status()).isEqualTo(saved.getStatus());
+        assertThat(event.createdAt()).isCloseTo(saved.getCreatedAt(), within(1, java.time.temporal.ChronoUnit.MILLIS));
         assertThat(event.reporterName()).isEqualTo("Synthetic Reporter");
         assertThat(event.reporterDepartment()).isEqualTo(saved.getReporterDepartment());
         assertThat(event.issueType()).isEqualTo(saved.getIssueType());

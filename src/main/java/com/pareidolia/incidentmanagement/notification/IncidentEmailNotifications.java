@@ -20,8 +20,14 @@ public final class IncidentEmailNotifications {
     private final Environment environment;
     private final ObjectProvider<JavaMailSender> senders;
     private final Executor executor;
+    private final IncidentEmailDetailPolicy detailPolicy;
     public IncidentEmailNotifications(Settings settings,Environment environment,ObjectProvider<JavaMailSender> senders,Executor executor) {
+        this(settings, environment, senders, executor, new IncidentEmailDetailPolicy(environment, java.util.stream.Stream::empty));
+    }
+    IncidentEmailNotifications(Settings settings, Environment environment, ObjectProvider<JavaMailSender> senders,
+            Executor executor, IncidentEmailDetailPolicy detailPolicy) {
         this.settings=settings;this.environment=environment;this.senders=senders;this.executor=executor;
+        this.detailPolicy = detailPolicy;
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT,fallbackExecution=false)
     public void created(IncidentCreated event) {
@@ -55,8 +61,10 @@ public final class IncidentEmailNotifications {
                 if(dev && !allowlist.contains(recipient)) {LOG.warn("Incident email recipient blocked by DEV allowlist.");continue;}
                 try {
                     if(v2) {
-                        // No trusted confidentiality classification exists in this baseline: never enable detail here.
-                        var rendered=IncidentEmailTemplate.render(event,false,environment.getProperty("app.notifications.email.portal-origin",""));
+                        String portalOrigin = environment.getProperty("app.notifications.email.portal-origin", "");
+                        boolean approved = IncidentEmailPortalLink.url(portalOrigin) != null
+                                && detailPolicy.allows(event.incidentNumber(), recipient);
+                        var rendered = IncidentEmailTemplate.render(event, approved, portalOrigin);
                         var message=sender.createMimeMessage();
                         var helper=new org.springframework.mail.javamail.MimeMessageHelper(message,true,"UTF-8");
                         helper.setFrom(from);helper.setTo(recipient);helper.setSubject(rendered.subject());
