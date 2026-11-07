@@ -15,13 +15,26 @@ class IncidentManagementServiceApplicationTests {
     org.springframework.context.ApplicationContext context;
 
     @Test
-    void emailReleaseContainsNoUnfinishedAdministrationOrAccessBeans() {
-        for (String name : java.util.List.of("incidentAccessActivationGuard", "incidentAccessPolicy",
-                "incidentAssignmentService", "employeeDirectoryService", "incidentSecurityAdministrationService")) {
+    void securityFoundationLoadsWithoutEnablingAdministrationOrAccess() {
+        org.assertj.core.api.Assertions.assertThat(context.getBean(
+                com.pareidolia.incidentmanagement.security.IncidentAccessActivationGuard.class)).isNotNull();
+        var gate = context.getBean(com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class);
+        gate.read();
+        gate.write();
+        org.assertj.core.api.Assertions.assertThat(gate.held()).isFalse();
+
+        for (String name : java.util.List.of("incidentAccessPolicy", "incidentAssignmentService",
+                "employeeDirectoryService", "incidentSecurityAdministrationService")) {
             org.assertj.core.api.Assertions.assertThat(context.containsBean(name)).as(name).isFalse();
         }
     }
 
+
+    @Test
+    void explicitIncidentAccessActivationIsRejected() {
+        org.assertj.core.api.Assertions.assertThatIllegalStateException().isThrownBy(() ->
+                new com.pareidolia.incidentmanagement.security.IncidentAccessActivationGuard(true));
+    }
 
 	@Test
 	void contextLoads() {

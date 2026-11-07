@@ -37,7 +37,15 @@ public class GoogleAuthenticationSuccessHandler implements AuthenticationSuccess
             return;
         }
 
-        appUserService.provisionUser(oidcUser);
+        try {
+            appUserService.provisionUser(oidcUser);
+        } catch (org.springframework.security.access.AccessDeniedException denied) {
+            org.springframework.security.core.context.SecurityContextHolder.clearContext();
+            var session = request.getSession(false);
+            if (session != null) session.invalidate();
+            response.sendError(HttpServletResponse.SC_FORBIDDEN);
+            return;
+        }
         response.sendRedirect(frontendUrl);
     }
 }
