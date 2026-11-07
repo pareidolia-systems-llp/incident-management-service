@@ -1,5 +1,7 @@
 # Email-only V2 portal-link release
 
+The release instructions below describe the historical portal-link release. The detailed-email branch has a separate routing prerequisite and is not ready for deployment. See [Trusted case routing](#trusted-case-routing-on-the-detailed-email-branch).
+
 Branch codex/email-v2-portal-link starts at verified GitHub backend main 2e61571cb7fdd182f1f57ccfe36d31c83c14ea2d. No commits or pushes were made during preparation. The source email-notifications-v2 worktree is retained intact.
 
 ## Integration and deliberate differences
@@ -158,3 +160,15 @@ Offline Maven package passed. The isolated frontend App.test.jsx routing suite p
 - src/test/java/com/pareidolia/incidentmanagement/notification/IncidentEmailV2Tests.java
 
 Synthetic preview files are review artifacts only. Their portal.example.test destination must be replaced by the approved production origin through configuration, never by editing template literals.
+
+## Trusted case routing on the detailed-email branch
+
+The production-compatible incident model has IT issues, service requests and security issue types. It has no trusted HR case marker. The reporter department, title, description and issue type cannot establish an HR or ordinary IT route. An explicitly reported security type only suppresses email.
+
+This branch requires exactly one trusted `IncidentEmailDetailAuthority` for all incident emails, including the legacy transport path. The authority must return a consistent case-specific decision using the incident number, based on independent case data and exact approved mailbox addresses. Missing, unknown, ambiguous or failed decisions withhold mail. This is an intentional change from the current production branch, which sends generic V2 mail without an authority.
+
+- Trusted ordinary IT cases classified STANDARD use configured global IT and HR recipients and, in V2, configured reporter-department recipients. Addresses are deduplicated. Approved addresses receive detail only with the explicit V2 details opt-in and a trusted portal origin. Other configured recipients receive the existing generic notice.
+- Trusted HR cases have one possible recipient, `schakravorty@pareidolia.in`. The global and departmental settings cannot add recipients to that route. Full details require trusted STANDARD classification and exact mailbox approval. Otherwise an explicit minimal-disclosure decision is required, and the notice contains no incident number or case details.
+- Security, unknown routing, and non-STANDARD ordinary IT cases withhold email. There is no security recipient policy.
+
+The branch registers no production authority. Do not deploy it as a drop-in replacement for the running generic V2 release. Before rollout, approve the authoritative classification and routing workflow, exact-recipient and HR minimal-disclosure rules, and handling for cases approved after creation. The after-commit listener sends only on creation and does not replay withheld messages. Detailed delivery remains disabled by default.

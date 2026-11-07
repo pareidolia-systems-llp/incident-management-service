@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.mail.MailSendException;
@@ -17,19 +18,21 @@ import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mock.env.MockEnvironment;
 
 import static com.pareidolia.incidentmanagement.notification.IncidentEmailDetailAuthority.Classification.*;
+import static com.pareidolia.incidentmanagement.notification.IncidentEmailDetailAuthority.Route.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class IncidentEmailDetailTests {
     private static final String NUMBER = "INC-2026-20261107-120000-ABCDEF12";
     private static final String IT = "it@example.test";
     private static final String HR = "hr@example.test";
+    private static final String HR_CASE = "schakravorty@pareidolia.in";
     private static final String OPS = "ops@example.test";
 
     @Test
     void sendsSeparateDetailedAndGenericMimeForTheSameCase() throws Exception {
         var fixture = new Fixture();
-        fixture.authority("authority", (number, recipient) ->
-                new IncidentEmailDetailAuthority.Decision(STANDARD, NUMBER.equals(number) && IT.equals(recipient)));
+        fixture.authority("authority", number -> NUMBER.equals(number)
+                ? new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, STANDARD, Set.of(IT), false) : null);
         fixture.send();
         assertThat(fixture.sender.messages).hasSize(3);
         String detailed = fixture.wire(IT);
@@ -41,42 +44,93 @@ class IncidentEmailDetailTests {
     }
 
     @Test
-    void restrictedAndUnclassifiedCasesStayGenericEvenWithAnAffirmativeMailboxDecision() throws Exception {
-        for (var classification : List.of(RESTRICTED, UNCLASSIFIED)) {
-            for (String reportedDepartment : List.of("HR", "Security", "Operations")) {
-                var fixture = new Fixture();
-                fixture.env.setProperty("app.notifications.email.v2.department-recipients",
-                        reportedDepartment + "=" + OPS + ",IT@example.test");
-                fixture.authority("authority", (number, recipient) ->
-                        new IncidentEmailDetailAuthority.Decision(classification, true));
-                fixture.send(reportedDepartment);
-                assertThat(fixture.sender.messages).hasSize(3);
-                for (String recipient : List.of(IT, HR, OPS)) {
-                    assertGeneric(fixture, recipient);
-                }
-            }
+    void trustedOrdinaryItCanSendDetailToEveryApprovedConfiguredRecipient() throws Exception {
+        var fixture = new Fixture();
+        fixture.authority("authority", number ->
+                new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, STANDARD, Set.of(IT, HR, OPS), false));
+        fixture.send();
+        assertThat(fixture.sender.messages).hasSize(3);
+        for (String recipient : List.of(IT, HR, OPS)) {
+            assertThat(fixture.wire(recipient)).contains("text/plain", "text/html", "Synthetic description");
         }
     }
 
     @Test
-    void absentAmbiguousUnknownOrFailingAuthorityPreservesGenericDelivery() throws Exception {
+    void trustedHrRouteOverridesAllConfiguredRecipientsEvenWhenReporterSelectsIt() throws Exception {
+        var fixture = new Fixture();
+        fixture.authority("authority", number -> new IncidentEmailDetailAuthority.Decision(
+                IncidentEmailDetailAuthority.Route.HR, STANDARD, Set.of(HR_CASE, IT, HR, OPS), false));
+        fixture.send("Operations");
+        assertThat(fixture.sender.messages).hasSize(1);
+        assertThat(fixture.wire(HR_CASE)).contains("text/plain", "text/html", "Synthetic description", NUMBER);
+    }
+
+    @Test
+    void hrMinimalRequiresExplicitApprovalAndOmitsIncidentNumber() throws Exception {
+        for (var classification : List.of(STANDARD, RESTRICTED, UNCLASSIFIED)) {
+            var fixture = new Fixture();
+            fixture.authority("authority", number -> new IncidentEmailDetailAuthority.Decision(
+                    IncidentEmailDetailAuthority.Route.HR, classification, Set.of(IT), true));
+            fixture.send();
+            assertThat(fixture.sender.messages).hasSize(1);
+            assertThat(fixture.wire(HR_CASE)).contains("text/plain", "text/html", "https://portal.example.test/")
+                    .doesNotContain(NUMBER, "Incident number", "Synthetic", "Operations");
+        }
+        var denied = new Fixture();
+        denied.authority("authority", number -> new IncidentEmailDetailAuthority.Decision(
+                IncidentEmailDetailAuthority.Route.HR, RESTRICTED, Set.of(HR_CASE), false));
+        denied.send();
+        assertThat(denied.sender.messages).isEmpty();
+    }
+
+    @Test
+    void disablingV2CannotSendAnHrCaseToTheLegacyGlobalList() throws Exception {
+        var fixture = new Fixture();
+        fixture.env.setProperty("app.notifications.email.v2.enabled", "false");
+        fixture.authority("authority", number -> new IncidentEmailDetailAuthority.Decision(
+                IncidentEmailDetailAuthority.Route.HR, STANDARD, Set.of(HR_CASE), true));
+        fixture.send();
+        assertThat(fixture.sender.messages).hasSize(1);
+        assertThat(fixture.wire(HR_CASE)).contains("text/plain", "text/html").doesNotContain(NUMBER, "Synthetic");
+    }
+
+    @Test
+    void unknownRestrictedAndSecurityRoutesNeverFallBackToBroadDelivery() {
+        for (var decision : List.of(
+                new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, UNCLASSIFIED, Set.of(IT), false),
+                new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, RESTRICTED, Set.of(IT), false),
+                new IncidentEmailDetailAuthority.Decision(SECURITY, STANDARD, Set.of(IT), true),
+                new IncidentEmailDetailAuthority.Decision(UNKNOWN, STANDARD, Set.of(IT), true))) {
+            var fixture = new Fixture();
+            fixture.authority("authority", number -> decision);
+            fixture.send("HR");
+            assertThat(fixture.sender.messages).isEmpty();
+        }
+
+        var conflicting = new Fixture();
+        conflicting.authority("authority", IncidentEmailTestSupport::standardIt);
+        conflicting.send("Operations", IssueType.INFORMATION_SECURITY_INCIDENT);
+        assertThat(conflicting.sender.messages).isEmpty();
+    }
+
+    @Test
+    void absentAmbiguousUnknownOrFailingAuthorityWithholdsEmail() {
         var missing = new Fixture();
         var ambiguous = new Fixture();
-        ambiguous.authority("first", (number, recipient) -> new IncidentEmailDetailAuthority.Decision(STANDARD, true));
-        ambiguous.authority("second", (number, recipient) -> new IncidentEmailDetailAuthority.Decision(STANDARD, true));
+        ambiguous.authority("first", IncidentEmailTestSupport::standardIt);
+        ambiguous.authority("second", IncidentEmailTestSupport::standardIt);
         var unknown = new Fixture();
-        unknown.authority("unknown", (number, recipient) -> null);
+        unknown.authority("unknown", number -> null);
         var failing = new Fixture();
-        failing.authority("failing", (number, recipient) -> { throw new IllegalStateException("synthetic lookup failure"); });
+        failing.authority("failing", number -> { throw new IllegalStateException("synthetic lookup failure"); });
         for (var fixture : List.of(missing, ambiguous, unknown, failing)) {
-            fixture.send();
-            assertThat(fixture.sender.messages).hasSize(3);
-            assertGeneric(fixture, IT);
+            fixture.send("HR");
+            assertThat(fixture.sender.messages).isEmpty();
         }
     }
 
     @Test
-    void requiresExplicitOptInAndTrustedPortalLinkBeforeConsultingAuthority() throws Exception {
+    void detailsRequireExplicitOptInAndTrustedPortalLink() throws Exception {
         var disabled = new Fixture();
         disabled.env.setProperty("app.notifications.email.v2.details-enabled", "false");
         var invalid = new Fixture();
@@ -84,9 +138,8 @@ class IncidentEmailDetailTests {
         var noLink = new Fixture();
         noLink.env.setProperty("app.notifications.email.portal-origin", "");
         for (var fixture : List.of(disabled, invalid, noLink)) {
-            fixture.authority("unused", (number, recipient) -> {
-                throw new AssertionError("Authority must not be consulted");
-            });
+            fixture.authority("authority", number ->
+                    new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, STANDARD, Set.of(IT), false));
             fixture.send();
             assertGeneric(fixture, IT);
         }
@@ -111,8 +164,8 @@ class IncidentEmailDetailTests {
     @Test
     void detailDeliveryFailureDoesNotStopOtherRecipients() throws Exception {
         var fixture = new Fixture();
-        fixture.authority("authority", (number, recipient) ->
-                new IncidentEmailDetailAuthority.Decision(STANDARD, IT.equals(recipient)));
+        fixture.authority("authority", number ->
+                new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, STANDARD, Set.of(IT), false));
         fixture.sender.failingRecipient = IT;
         fixture.send();
         assertThat(fixture.sender.messages).hasSize(2);
@@ -149,13 +202,17 @@ class IncidentEmailDetailTests {
         }
 
         void send(String department) {
+            send(department, IssueType.IT_ISSUE);
+        }
+
+        void send(String department, IssueType issueType) {
             var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test",
-                    IT, HR, String.join(",", IT, HR, OPS));
+                    IT, HR, String.join(",", IT, HR, OPS, HR_CASE));
             new IncidentEmailConfiguration().incidentEmailNotifications(settings, env,
                     beans.getBeanProvider(JavaMailSender.class),
                     beans.getBeanProvider(IncidentEmailDetailAuthority.class), Runnable::run)
                     .created(new IncidentCreated(NUMBER, "Synthetic title", "Synthetic reporter", department,
-                            IssueType.IT_ISSUE, Severity.LOW, Priority.HIGH, LocalDateTime.parse("2026-11-07T12:00:00"),
+                            issueType, Severity.LOW, Priority.HIGH, LocalDateTime.parse("2026-11-07T12:00:00"),
                             "Synthetic description", "Synthetic handler", IncidentStatus.OPEN,
                             LocalDateTime.parse("2026-11-07T12:01:00")));
         }

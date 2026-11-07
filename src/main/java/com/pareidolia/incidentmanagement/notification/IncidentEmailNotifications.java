@@ -1,5 +1,6 @@
 package com.pareidolia.incidentmanagement.notification;
 
+import com.pareidolia.incidentmanagement.enums.IssueType;
 import jakarta.mail.internet.InternetAddress;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -11,19 +12,20 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.transaction.event.*;
 
+import static com.pareidolia.incidentmanagement.notification.IncidentEmailDetailAuthority.Classification.STANDARD;
+import static com.pareidolia.incidentmanagement.notification.IncidentEmailDetailAuthority.Route.*;
+
 /** Best effort after-commit delivery. No durable queue or automatic retries. */
 public final class IncidentEmailNotifications {
     public record Settings(boolean enabled,String from,String itRecipients,String hrRecipients,String devAllowlist) { }
     private static final org.slf4j.Logger LOG=org.slf4j.LoggerFactory.getLogger(IncidentEmailNotifications.class);
     private static final String APPROVED_PRODUCTION_SENDER="alerts@pareidolia.in";
+    private static final String HR_CASE_MAILBOX = "schakravorty@pareidolia.in";
     private final Settings settings;
     private final Environment environment;
     private final ObjectProvider<JavaMailSender> senders;
     private final Executor executor;
     private final IncidentEmailDetailPolicy detailPolicy;
-    public IncidentEmailNotifications(Settings settings,Environment environment,ObjectProvider<JavaMailSender> senders,Executor executor) {
-        this(settings, environment, senders, executor, new IncidentEmailDetailPolicy(environment, java.util.stream.Stream::empty));
-    }
     IncidentEmailNotifications(Settings settings, Environment environment, ObjectProvider<JavaMailSender> senders,
             Executor executor, IncidentEmailDetailPolicy detailPolicy) {
         this.settings=settings;this.environment=environment;this.senders=senders;this.executor=executor;
@@ -43,9 +45,16 @@ public final class IncidentEmailNotifications {
             if(!settings.enabled() || dev==production) return;
             if(event.incidentNumber()==null || !event.incidentNumber().matches("INC-[0-9]{4}-[0-9]{8}-[0-9]{6}-[A-F0-9]{8}")) return;
             boolean v2=environment.getProperty("app.notifications.email.v2.enabled",Boolean.class,false);
-            var recipients=addresses(settings.itRecipients()+","+settings.hrRecipients());
-            if(v2) {
-                // The reporter-selected department routes generic messages only; it never grants access.
+            // Reporter input may only narrow delivery. It cannot establish an IT or HR route.
+            if (event.issueType() != IssueType.IT_ISSUE && event.issueType() != IssueType.SERVICE_REQUEST) return;
+            var decision = detailPolicy.assess(event.incidentNumber()).orElse(null);
+            if (decision == null) return;
+            boolean hrCase = decision.route() == HR;
+            if (!hrCase && (decision.route() != ORDINARY_IT || decision.classification() != STANDARD)) return;
+
+            var recipients = hrCase ? Set.of(HR_CASE_MAILBOX)
+                    : addresses(settings.itRecipients()+","+settings.hrRecipients());
+            if (v2 && !hrCase) {
                 addDepartmentRecipients(recipients,event.reporterDepartment(),
                         environment.getProperty("app.notifications.email.v2.department-recipients",""));
             }
@@ -60,11 +69,13 @@ public final class IncidentEmailNotifications {
                 // Final transport boundary: never put an unapproved recipient in To/CC/BCC.
                 if(dev && !allowlist.contains(recipient)) {LOG.warn("Incident email recipient blocked by DEV allowlist.");continue;}
                 try {
-                    if(v2) {
+                    if (v2 || hrCase) {
                         String portalOrigin = environment.getProperty("app.notifications.email.portal-origin", "");
-                        boolean approved = IncidentEmailPortalLink.url(portalOrigin) != null
-                                && detailPolicy.allows(event.incidentNumber(), recipient);
-                        var rendered = IncidentEmailTemplate.render(event, approved, portalOrigin);
+                        boolean approved = v2 && detailPolicy.allowsDetails(decision, recipient,
+                                IncidentEmailPortalLink.url(portalOrigin));
+                        if (hrCase && !approved && !decision.hrMinimalApproved()) continue;
+                        var rendered = hrCase && !approved ? IncidentEmailTemplate.renderMinimal(portalOrigin)
+                                : IncidentEmailTemplate.render(event, approved, portalOrigin);
                         var message=sender.createMimeMessage();
                         var helper=new org.springframework.mail.javamail.MimeMessageHelper(message,true,"UTF-8");
                         helper.setFrom(from);helper.setTo(recipient);helper.setSubject(rendered.subject());

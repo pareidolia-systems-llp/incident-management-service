@@ -1,16 +1,28 @@
 package com.pareidolia.incidentmanagement.notification;
 
+import java.util.Objects;
+import java.util.Set;
+
 /**
- * Trusted server-side source of case-specific authorization for email disclosure.
- * Implementations must verify current classification and approval for full content at the exact
- * recipient address, including mailbox ownership and audience. Routing, user input and portal
- * access alone do not establish approval. No implementation is registered by the email-only release.
+ * Trusted case-specific email decision, read as one consistent snapshot at delivery time.
+ * Routing and confidentiality must come from independently verified case data. Recipient
+ * approvals must cover the exact mailbox and its audience. Reporter input and portal
+ * access are insufficient. The email-only branch supplies no production implementation.
  */
 @FunctionalInterface
 public interface IncidentEmailDetailAuthority {
+    enum Route { ORDINARY_IT, HR, SECURITY, UNKNOWN }
     enum Classification { STANDARD, RESTRICTED, UNCLASSIFIED }
 
-    record Decision(Classification classification, boolean fullEmailContentApproved) { }
+    record Decision(Route route, Classification classification, Set<String> detailedRecipients,
+                    boolean hrMinimalApproved) {
+        public Decision {
+            Objects.requireNonNull(route);
+            Objects.requireNonNull(classification);
+            // Exact, canonical addresses only, as used by the SMTP recipient boundary.
+            detailedRecipients = Set.copyOf(detailedRecipients);
+        }
+    }
 
-    Decision assess(String incidentNumber, String recipient);
+    Decision assess(String incidentNumber);
 }

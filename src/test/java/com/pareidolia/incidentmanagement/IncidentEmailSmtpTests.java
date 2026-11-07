@@ -5,6 +5,7 @@ import com.pareidolia.incidentmanagement.entity.AppUser;
 import com.pareidolia.incidentmanagement.enums.*;
 import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.notification.IncidentEmailConfiguration;
+import com.pareidolia.incidentmanagement.notification.IncidentEmailTestSupport.TrustedItConfiguration;
 import com.pareidolia.incidentmanagement.repository.*;
 import com.pareidolia.incidentmanagement.service.*;
 import com.pareidolia.incidentmanagement.service.impl.IncidentServiceImpl;
@@ -33,7 +34,7 @@ import static org.mockito.Mockito.*;
  "app.notifications.email.dev-allowlist=oversight@example.test","app.notifications.email.smtp.host=127.0.0.1",
  "app.notifications.email.smtp.username=","app.notifications.email.smtp.password=","app.notifications.email.smtp.starttls=false"})
 @ActiveProfiles("dev")
-@Import({IncidentServiceImpl.class,IncidentMapper.class,IncidentEmailConfiguration.class})
+@Import({IncidentServiceImpl.class,IncidentMapper.class,IncidentEmailConfiguration.class,TrustedItConfiguration.class})
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentEmailSmtpTests {
     static final Capture CAPTURE=new Capture();

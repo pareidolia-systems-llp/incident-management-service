@@ -35,15 +35,15 @@ class IncidentEmailV2Tests {
         assertThat(IncidentEmailTemplate.clean("x".repeat(1000)+"\u202e",120)).hasSize(120);
     }
     @SuppressWarnings("unchecked")
-    @Test void everyIssueTypeReachesBothGlobalRecipientsWithoutConfidentialContent() throws Exception {
+    @Test void onlyOrdinaryReportedTypesCanReachGlobalRecipients() throws Exception {
         var sender=mock(JavaMailSender.class);var provider=mock(ObjectProvider.class);when(provider.getIfUnique()).thenReturn(sender);
         when(sender.createMimeMessage()).thenAnswer(x -> new MimeMessage(Session.getInstance(new Properties())));
         var env=new MockEnvironment();env.setActiveProfiles("dev");env.setProperty("app.notifications.email.v2.enabled","true");
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","it@example.test","hr@example.test,it@example.test","it@example.test,hr@example.test");
-        var notification=new IncidentEmailNotifications(settings,env,provider,Runnable::run);
+        var notification=IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run);
         for(var issue:IssueType.values()) notification.created(event(issue));
         var messages=org.mockito.ArgumentCaptor.forClass(MimeMessage.class);
-        verify(sender,times(2*IssueType.values().length)).send(messages.capture());
+        verify(sender,times(4)).send(messages.capture());
         for(var message:messages.getAllValues()) {
             assertThat(message.getAllRecipients()).hasSize(1);
             message.saveChanges();var bytes=new ByteArrayOutputStream();message.writeTo(bytes);String raw=bytes.toString(StandardCharsets.UTF_8);
@@ -64,7 +64,7 @@ class IncidentEmailV2Tests {
             +"R&D=debolina@pareidolia.in;HR=SCHAKRAVORTY@PAREIDOLIA.IN");
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","itadmin@pareidolia.in","schakravorty@pareidolia.in",
             "itadmin@pareidolia.in,schakravorty@pareidolia.in,annotator@pareidolia.in,annotator02@pareidolia.in,debolina@pareidolia.in");
-        var notifier=new IncidentEmailNotifications(settings,env,provider,Runnable::run);
+        var notifier=IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run);
         for(String department:new String[]{"Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D","HR","Unmapped"}) {
             clearInvocations(sender);
             var original=event(IssueType.IT_ISSUE);
@@ -88,7 +88,7 @@ class IncidentEmailV2Tests {
         verify(sender,times(2)).send(any(MimeMessage.class));
         clearInvocations(sender);
         env.setProperty("app.notifications.email.v2.department-recipients","Ops & Sales=invalid address");
-        notifier.created(event(IssueType.INFORMATION_SECURITY_INCIDENT));
+        notifier.created(event(IssueType.IT_ISSUE));
         verify(sender,times(2)).send(any(MimeMessage.class));
     }
     private static String recipient(MimeMessage message) {
@@ -102,7 +102,7 @@ class IncidentEmailV2Tests {
         env.setProperty("app.notifications.email.v2.department-recipients","Ops & Sales=extra@example.test");
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","it@example.test","hr@example.test",
             "it@example.test,hr@example.test,extra@example.test");
-        new IncidentEmailNotifications(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));
+        IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));
         var messages=org.mockito.ArgumentCaptor.forClass(org.springframework.mail.SimpleMailMessage.class);
         verify(sender,times(2)).send(messages.capture());
         assertThat(messages.getAllValues()).extracting(m -> m.getTo()[0]).containsExactly("it@example.test","hr@example.test");
@@ -114,8 +114,8 @@ class IncidentEmailV2Tests {
         when(sender.createMimeMessage()).thenAnswer(x -> new MimeMessage(Session.getInstance(new Properties())));
         var env=new MockEnvironment();env.setActiveProfiles("dev");env.setProperty("app.notifications.email.v2.enabled","true");
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","blocked@example.test","hr@example.test","hr@example.test");
-        new IncidentEmailNotifications(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));verify(sender,times(1)).send(any(MimeMessage.class));
+        IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));verify(sender,times(1)).send(any(MimeMessage.class));
         clearInvocations(sender);settings=new IncidentEmailNotifications.Settings(false,"sender@example.test","blocked@example.test","hr@example.test","hr@example.test");
-        new IncidentEmailNotifications(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));verifyNoInteractions(sender);
+        IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));verifyNoInteractions(sender);
     }
 }

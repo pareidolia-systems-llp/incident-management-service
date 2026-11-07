@@ -10,11 +10,15 @@ final class IncidentEmailTemplate {
     }
     static Rendered render(IncidentCreated event, boolean approvedContent, String portalOrigin) {
         String portalUrl = IncidentEmailPortalLink.url(portalOrigin);
-        String number=clean(event.incidentNumber(),50);
+        String number = event == null ? null : clean(event.incidentNumber(), 50);
         // Keep incident details out of the subject line.
         String subject = "New incident created";
-        StringBuilder plain=new StringBuilder("A new incident was created.\nIncident number: ").append(number);
-        StringBuilder rows=new StringBuilder(row("Incident number",number));
+        StringBuilder plain = new StringBuilder("A new incident was created.");
+        StringBuilder rows = new StringBuilder();
+        if (number != null) {
+            plain.append("\nIncident number: ").append(number);
+            rows.append(row("Incident number", number));
+        }
         if (approvedContent) {
             String handler = clean(event.assignedHandler(), 255);
             String[][] values = {
@@ -55,6 +59,10 @@ final class IncidentEmailTemplate {
             +portalLink+"</td></tr></table></td></tr></table></body></html>";
         return new Rendered(subject,plain.toString(),html);
     }
+    static Rendered renderMinimal(String portalOrigin) {
+        return render(null, false, portalOrigin);
+    }
+
     private static String row(String label,String value) {
         return "<tr><th scope=\"row\" style=\"padding:8px;text-align:left;vertical-align:top\">"+HtmlUtils.htmlEscape(label)
                 +"</th><td style=\"padding:8px;overflow-wrap:anywhere\">"+HtmlUtils.htmlEscape(value)+"</td></tr>";
