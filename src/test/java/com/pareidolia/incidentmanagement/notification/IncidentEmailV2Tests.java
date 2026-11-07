@@ -65,7 +65,7 @@ class IncidentEmailV2Tests {
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","itadmin@pareidolia.in","schakravorty@pareidolia.in",
             "itadmin@pareidolia.in,schakravorty@pareidolia.in,annotator@pareidolia.in,annotator02@pareidolia.in,debolina@pareidolia.in");
         var notifier=IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run);
-        for(String department:new String[]{"Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D","HR","Unmapped"}) {
+        for(String department:new String[]{"Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D","Unmapped"}) {
             clearInvocations(sender);
             var original=event(IssueType.IT_ISSUE);
             notifier.created(new IncidentCreated(original.incidentNumber(),original.title(),original.reporterName(),department,
@@ -85,7 +85,7 @@ class IncidentEmailV2Tests {
         var original=event(IssueType.IT_ISSUE);
         notifier.created(new IncidentCreated(original.incidentNumber(),original.title(),original.reporterName(),
             "HR=attacker@example.test",original.issueType(),original.severity(),original.priority(),original.reportedAt()));
-        verify(sender,times(2)).send(any(MimeMessage.class));
+        verifyNoInteractions(sender);
         clearInvocations(sender);
         env.setProperty("app.notifications.email.v2.department-recipients","Ops & Sales=invalid address");
         notifier.created(event(IssueType.IT_ISSUE));

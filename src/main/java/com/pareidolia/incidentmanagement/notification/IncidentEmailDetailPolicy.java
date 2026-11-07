@@ -1,6 +1,5 @@
 package com.pareidolia.incidentmanagement.notification;
 
-import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.springframework.core.env.Environment;
@@ -17,20 +16,26 @@ final class IncidentEmailDetailPolicy {
         this.authorities = authorities;
     }
 
-    Optional<IncidentEmailDetailAuthority.Decision> assess(String incidentNumber) {
+    record Assessment(boolean authorityConfigured, IncidentEmailDetailAuthority.Decision decision) { }
+
+    Assessment assess(String incidentNumber) {
         try (var candidates = authorities.get()) {
             var sources = candidates.limit(2).toList();
-            return sources.size() == 1 ? Optional.ofNullable(sources.get(0).assess(incidentNumber)) : Optional.empty();
+            return new Assessment(!sources.isEmpty(),
+                    sources.size() == 1 ? sources.get(0).assess(incidentNumber) : null);
         } catch (RuntimeException failure) {
             LOG.warn("Incident email authorization unavailable. Notification withheld.");
-            return Optional.empty();
+            return new Assessment(true, null);
         }
     }
 
     boolean allowsDetails(IncidentEmailDetailAuthority.Decision decision, String recipient, String portalUrl) {
-        return portalUrl != null
-                && "true".equalsIgnoreCase(environment.getProperty("app.notifications.email.v2.details-enabled"))
-                && decision.classification() == STANDARD
+        return detailsEnabled(portalUrl) && decision.classification() == STANDARD
                 && decision.detailedRecipients().contains(recipient);
+    }
+
+    boolean detailsEnabled(String portalUrl) {
+        return portalUrl != null
+                && "true".equalsIgnoreCase(environment.getProperty("app.notifications.email.v2.details-enabled"));
     }
 }

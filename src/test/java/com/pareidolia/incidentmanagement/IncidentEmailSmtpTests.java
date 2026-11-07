@@ -55,13 +55,13 @@ class IncidentEmailSmtpTests {
     @AfterEach void cleanup() throws Exception { drain();new TransactionTemplate(transactions).executeWithoutResult(s->{history.deleteAll();repository.findAll().forEach(em::remove);}); }
     @AfterAll static void stop() throws Exception { CAPTURE.close(); }
     void drain() throws Exception { incidentEmailExecutor.getThreadPoolExecutor().submit(()->{}).get(8,TimeUnit.SECONDS); }
-    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private HR title");r.setDescription("confidential complaint");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
+    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private incident title");r.setDescription("private diagnostic notes");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
     @Test void committedCreationSendsOneGenericMessageToAllowlistedRecipient() throws Exception {
         assertThat(mailSender).isInstanceOf(org.springframework.mail.javamail.JavaMailSenderImpl.class);
         var result=new TransactionTemplate(transactions).execute(s->{var incident=incidents.createIncident(request());assertThat(CAPTURE.messages).isEmpty();return incident;});
         drain();assertThat(CAPTURE.messages).hasSize(1);String msg=CAPTURE.messages.get(0);
         assertThat(msg).contains("Subject: New incident created",result.getIncidentNumber(),"Sign in to the incident management portal");
-        assertThat(msg).doesNotContain("private HR title","confidential complaint","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
+        assertThat(msg).doesNotContain("private incident title","private diagnostic notes","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
     }
     @Test void rollbackDoesNotSend() throws Exception {new TransactionTemplate(transactions).executeWithoutResult(s->{incidents.createIncident(request());s.setRollbackOnly();});drain();assertThat(CAPTURE.messages).isEmpty();assertThat(repository.count()).isZero();}
     @Test void transportFailureDoesNotRollbackIncident() throws Exception {

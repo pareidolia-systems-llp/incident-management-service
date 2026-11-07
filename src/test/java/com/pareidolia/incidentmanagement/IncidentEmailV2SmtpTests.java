@@ -5,7 +5,6 @@ import com.pareidolia.incidentmanagement.entity.AppUser;
 import com.pareidolia.incidentmanagement.enums.*;
 import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.notification.IncidentEmailConfiguration;
-import com.pareidolia.incidentmanagement.notification.IncidentEmailTestSupport.TrustedItConfiguration;
 import com.pareidolia.incidentmanagement.repository.*;
 import com.pareidolia.incidentmanagement.service.*;
 import com.pareidolia.incidentmanagement.service.impl.IncidentServiceImpl;
@@ -29,7 +28,7 @@ import static org.mockito.Mockito.*;
 
 @DataJpaTest(properties={"spring.datasource.url=jdbc:h2:mem:smtp_capture_test;DB_CLOSE_DELAY=-1","spring.datasource.username=sa","spring.datasource.password=",
  "spring.jpa.hibernate.ddl-auto=create-drop","spring.jpa.show-sql=false","app.department-routing.enabled=false","app.notifications.in-app.enabled=false",
- "app.notifications.email.v2.enabled=true","app.notifications.email.v2.details-enabled=true","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
+ "app.notifications.email.v2.enabled=true","app.notifications.email.v2.routine-routing-enabled=true","app.notifications.email.v2.details-enabled=false","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
  "app.notifications.email.it-recipients=oversight@example.test,blocked@example.test","app.notifications.email.hr-recipients=oversight@example.test",
  "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test",
  "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test",
@@ -37,7 +36,7 @@ import static org.mockito.Mockito.*;
  "app.notifications.email.smtp.username=","app.notifications.email.smtp.password=","app.notifications.email.smtp.starttls=false"})
 @org.springframework.test.context.event.RecordApplicationEvents
 @ActiveProfiles("dev")
-@Import({IncidentServiceImpl.class,IncidentMapper.class,IncidentEmailConfiguration.class,TrustedItConfiguration.class})
+@Import({IncidentServiceImpl.class,IncidentMapper.class,IncidentEmailConfiguration.class})
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentEmailV2SmtpTests {
     static final Capture CAPTURE=new Capture();
@@ -59,13 +58,13 @@ class IncidentEmailV2SmtpTests {
     @AfterEach void cleanup() throws Exception { drain();new TransactionTemplate(transactions).executeWithoutResult(s->{history.deleteAll();repository.findAll().forEach(em::remove);}); }
     @AfterAll static void stop() throws Exception { CAPTURE.close(); }
     void drain() throws Exception { incidentEmailExecutor.getThreadPoolExecutor().submit(()->{}).get(8,TimeUnit.SECONDS); }
-    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private HR title");r.setDescription("confidential complaint");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
+    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private incident title");r.setDescription("private diagnostic notes");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
     @Test void committedCreationSendsOneGenericMessageToAllowlistedRecipient() throws Exception {
         assertThat(mailSender).isInstanceOf(org.springframework.mail.javamail.JavaMailSenderImpl.class);
         var result=new TransactionTemplate(transactions).execute(s->{var incident=incidents.createIncident(request());assertThat(CAPTURE.messages).isEmpty();return incident;});
         drain();assertThat(CAPTURE.messages).hasSize(1);String msg=CAPTURE.messages.get(0);
         assertThat(msg).contains("Subject: New incident created",result.getIncidentNumber(),"Sign in to the incident management portal","text/plain","text/html","https://portal.example.test/","Open Incident Management Portal");
-        assertThat(msg).doesNotContain("private HR title","confidential complaint","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
+        assertThat(msg).doesNotContain("private incident title","private diagnostic notes","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
     }
     @Test void creationPublishesSavedMetadataAndAuthenticatedReporter() throws Exception {
         var created=incidents.createIncident(request());drain();
@@ -93,7 +92,7 @@ class IncidentEmailV2SmtpTests {
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: annotations02@example.test")).hasSize(1);
         for(String message:CAPTURE.messages) {
             assertThat(message).contains("text/plain","text/html","New incident created")
-                    .doesNotContain("private HR title","confidential complaint","Synthetic Reporter", "Operations (Annotation)");
+                    .doesNotContain("private incident title","private diagnostic notes","Synthetic Reporter", "Operations (Annotation)");
             assertThat(message.lines().filter(line -> line.startsWith("To: ")).count()).isEqualTo(1);
             assertThat(message).doesNotContain("\nCc:","\nBcc:");
         }

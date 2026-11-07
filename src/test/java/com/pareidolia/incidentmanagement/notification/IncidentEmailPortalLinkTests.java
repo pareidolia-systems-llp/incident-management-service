@@ -68,7 +68,7 @@ class IncidentEmailPortalLinkTests {
         var settings = new IncidentEmailNotifications.Settings(true,"sender@example.test","it@example.test",
                 "hr@example.test,IT@example.test","it@example.test,hr@example.test,ops1@example.test,ops2@example.test,research@example.test");
         var notifications = IncidentEmailTestSupport.trustedItNotifier(settings,env,beans.getBeanProvider(JavaMailSender.class),Runnable::run);
-        for (String department : List.of("Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D","HR")) {
+        for (String department : List.of("Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D")) {
             sender.messages.clear();
             notifications.created(new IncidentCreated("INC-2026-20261106-120000-ABCDEF12","private title","private reporter",department,com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE,null,null,null));
             var expected = new HashSet<>(Set.of("it@example.test","hr@example.test"));

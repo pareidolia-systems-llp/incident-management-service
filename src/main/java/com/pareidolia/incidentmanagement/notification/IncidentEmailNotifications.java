@@ -1,6 +1,5 @@
 package com.pareidolia.incidentmanagement.notification;
 
-import com.pareidolia.incidentmanagement.enums.IssueType;
 import jakarta.mail.internet.InternetAddress;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -45,12 +44,16 @@ public final class IncidentEmailNotifications {
             if(!settings.enabled() || dev==production) return;
             if(event.incidentNumber()==null || !event.incidentNumber().matches("INC-[0-9]{4}-[0-9]{8}-[0-9]{6}-[A-F0-9]{8}")) return;
             boolean v2=environment.getProperty("app.notifications.email.v2.enabled",Boolean.class,false);
-            // Reporter input may only narrow delivery. It cannot establish an IT or HR route.
-            if (event.issueType() != IssueType.IT_ISSUE && event.issueType() != IssueType.SERVICE_REQUEST) return;
-            var decision = detailPolicy.assess(event.incidentNumber()).orElse(null);
-            if (decision == null) return;
-            boolean hrCase = decision.route() == HR;
-            if (!hrCase && (decision.route() != ORDINARY_IT || decision.classification() != STANDARD)) return;
+            var hint = RoutineIncidentEmailRoute.from(event);
+            if (hint == UNKNOWN || hint == SECURITY) return;
+            var assessment = detailPolicy.assess(event.incidentNumber());
+            var decision = assessment.decision();
+            boolean routine = v2 && !assessment.authorityConfigured() && "true".equalsIgnoreCase(
+                    environment.getProperty("app.notifications.email.v2.routine-routing-enabled"));
+            if (!routine && (decision == null || (hint == HR && decision.route() != HR))) return;
+            var route = routine ? hint : decision.route();
+            boolean hrCase = route == HR;
+            if (!hrCase && (route != ORDINARY_IT || (!routine && decision.classification() != STANDARD))) return;
 
             var recipients = hrCase ? Set.of(HR_CASE_MAILBOX)
                     : addresses(settings.itRecipients()+","+settings.hrRecipients());
@@ -71,9 +74,11 @@ public final class IncidentEmailNotifications {
                 try {
                     if (v2 || hrCase) {
                         String portalOrigin = environment.getProperty("app.notifications.email.portal-origin", "");
-                        boolean approved = v2 && detailPolicy.allowsDetails(decision, recipient,
-                                IncidentEmailPortalLink.url(portalOrigin));
-                        if (hrCase && !approved && !decision.hrMinimalApproved()) continue;
+                        String portalUrl = IncidentEmailPortalLink.url(portalOrigin);
+                        boolean approved = v2 && (routine
+                                ? !hrCase && detailPolicy.detailsEnabled(portalUrl)
+                                : detailPolicy.allowsDetails(decision, recipient, portalUrl));
+                        if (hrCase && !approved && !routine && !decision.hrMinimalApproved()) continue;
                         var rendered = hrCase && !approved ? IncidentEmailTemplate.renderMinimal(portalOrigin)
                                 : IncidentEmailTemplate.render(event, approved, portalOrigin);
                         var message=sender.createMimeMessage();

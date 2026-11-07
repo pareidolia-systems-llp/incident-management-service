@@ -36,7 +36,7 @@ public class CreateIncidentRequestDto {
     @Size(max = 100)
     @Pattern(regexp = "(?:|Network / Connectivity|Account / Access|Hardware|Software / Application|Email / Collaboration|Device / Peripheral|Other"
             + "|Server / Infrastructure|Database|Security / Endpoint"
-            + "|Account / Access Request|Software Installation|Hardware Request|Permission / Access Change|General IT Request"
+            + "|Account / Access Request|Software Installation|Hardware Request|Permission / Access Change|General IT Request|Routine HR Request"
             + "|Phishing / Suspicious Email|Suspicious Login / Account Activity|Malware / Suspicious File|Unauthorized Access|Data Leakage / Exposure|Lost / Stolen Device"
             + "|Account Compromise|Malware|Data Breach / Exposure|Policy Violation|Security Control Failure"
             + "|Ransomware|Major Data Breach|Critical System Compromise|Privileged Account Compromise|Widespread Malware|Major Service / Security Outage)",

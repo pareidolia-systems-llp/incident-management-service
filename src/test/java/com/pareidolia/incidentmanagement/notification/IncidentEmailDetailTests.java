@@ -56,6 +56,25 @@ class IncidentEmailDetailTests {
     }
 
     @Test
+    void approvalsCannotTransferToAnotherCaseOrAddAnUnroutedRecipient() throws Exception {
+        var fixture = new Fixture();
+        fixture.authority("authority", number -> NUMBER.equals(number)
+                ? new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, STANDARD,
+                        Set.of(IT, HR_CASE), false)
+                : null);
+
+        fixture.send();
+        assertThat(fixture.sender.messages).hasSize(3);
+        assertThat(fixture.wire(IT)).contains("Synthetic description");
+        assertGeneric(fixture, HR);
+        assertGeneric(fixture, OPS);
+
+        fixture.sender.messages.clear();
+        fixture.send("INC-2026-20261107-120000-ABCDEF13", "Operations", IssueType.IT_ISSUE);
+        assertThat(fixture.sender.messages).isEmpty();
+    }
+
+    @Test
     void trustedHrRouteOverridesAllConfiguredRecipientsEvenWhenReporterSelectsIt() throws Exception {
         var fixture = new Fixture();
         fixture.authority("authority", number -> new IncidentEmailDetailAuthority.Decision(
@@ -173,6 +192,122 @@ class IncidentEmailDetailTests {
         assertGeneric(fixture, OPS);
     }
 
+    @Test
+    void routineRoutingCoversEveryIssueType() throws Exception {
+        for (IssueType type : IssueType.values()) {
+            var fixture = new Fixture();
+            fixture.enableRoutineRouting();
+            fixture.send("Operations", type);
+            switch (type) {
+                case IT_ISSUE, SERVICE_REQUEST -> {
+                    assertThat(fixture.sender.messages).hasSize(3);
+                    for (String recipient : List.of(IT, HR, OPS)) {
+                        assertThat(fixture.wire(recipient)).contains("text/plain", "text/html",
+                                "Synthetic description", "https://portal.example.test/");
+                    }
+                }
+                case HR_ISSUE -> {
+                    assertThat(fixture.sender.messages).hasSize(1);
+                    assertThat(fixture.wire(HR_CASE)).doesNotContain(NUMBER, "Synthetic");
+                }
+                case SUSPECTED_SECURITY_INCIDENT, INFORMATION_SECURITY_INCIDENT, MAJOR_CRITICAL_SECURITY_INCIDENT ->
+                        assertThat(fixture.sender.messages).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void hrHintsNarrowMislabeledRoutineIssuesAndSecurityVetoesBothRoutes() throws Exception {
+        for (var event : List.of(
+                hinted("Human Resources", null, null, null),
+                hinted("Operations", "Routine HR Request", null, null),
+                hinted("Operations", null, "Question about payroll", null),
+                hinted("Operations", null, null, "HR"))) {
+            var routine = new Fixture();
+            routine.enableRoutineRouting();
+            routine.send(event);
+            assertThat(routine.sender.messages).hasSize(1);
+            assertThat(routine.wire(HR_CASE)).doesNotContain(NUMBER, "payroll");
+
+            var trustedIt = new Fixture();
+            trustedIt.authority("authority", IncidentEmailTestSupport::standardIt);
+            trustedIt.send(event);
+            assertThat(trustedIt.sender.messages).isEmpty();
+        }
+        var security = new Fixture();
+        security.enableRoutineRouting();
+        security.send(hinted("HR", "Routine HR Request", "Suspicious login", null));
+        assertThat(security.sender.messages).isEmpty();
+    }
+
+    @Test
+    void routineOptInCannotOverrideAConfiguredAuthority() {
+        var restricted = new Fixture();
+        restricted.enableRoutineRouting();
+        restricted.authority("authority", number ->
+                new IncidentEmailDetailAuthority.Decision(ORDINARY_IT, RESTRICTED, Set.of(IT), false));
+        var ambiguous = new Fixture();
+        ambiguous.enableRoutineRouting();
+        ambiguous.authority("first", IncidentEmailTestSupport::standardIt);
+        ambiguous.authority("second", IncidentEmailTestSupport::standardIt);
+        for (var fixture : List.of(restricted, ambiguous)) {
+            fixture.send();
+            assertThat(fixture.sender.messages).isEmpty();
+        }
+    }
+
+    @Test
+    void routineRoutingWithholdsUnknownTypeAndInvalidGlobalConfiguration() {
+        var missing = new Fixture();
+        missing.enableRoutineRouting();
+        missing.send("Operations", null);
+        assertThat(missing.sender.messages).isEmpty();
+
+        var invalid = new Fixture();
+        invalid.enableRoutineRouting();
+        invalid.send(hinted("Operations", null, null, null), "invalid mailbox");
+        assertThat(invalid.sender.messages).isEmpty();
+    }
+
+    @Test
+    void routineDetailsRequireOptInAndSafePortalAndEscapeHtml() throws Exception {
+        var event = hinted("Operations", null, "<script>example</script>", null);
+        var detailed = new Fixture();
+        detailed.enableRoutineRouting();
+        detailed.send(event);
+        assertThat(detailed.wire(IT).replace("=\r\n", "").replace("=\n", ""))
+                .contains("&lt;script&gt;example&lt;/script&gt;");
+
+        var disabled = new Fixture();
+        disabled.enableRoutineRouting();
+        disabled.env.setProperty("app.notifications.email.v2.details-enabled", "false");
+        disabled.send(event);
+        assertGeneric(disabled, IT);
+
+        var badOrigin = new Fixture();
+        badOrigin.enableRoutineRouting();
+        badOrigin.env.setProperty("app.notifications.email.portal-origin", "http://portal.example.test");
+        badOrigin.send(event);
+        assertThat(badOrigin.sender.messages).isEmpty();
+    }
+
+    @Test
+    void routineDeliveryFailureDoesNotStopOtherRecipients() throws Exception {
+        var fixture = new Fixture();
+        fixture.enableRoutineRouting();
+        fixture.sender.failingRecipient = IT;
+        fixture.send();
+        assertThat(fixture.sender.messages).hasSize(2);
+        assertThat(fixture.wire(HR)).contains("Synthetic description");
+        assertThat(fixture.wire(OPS)).contains("Synthetic description");
+    }
+
+    private static IncidentCreated hinted(String department, String category, String description, String impact) {
+        return new IncidentCreated(NUMBER, "Synthetic title", "Synthetic reporter", department,
+                IssueType.IT_ISSUE, null, null, null, description, null, null, null,
+                category, null, impact);
+    }
+
     private static void assertGeneric(Fixture fixture, String recipient) throws Exception {
         assertThat(fixture.wire(recipient)).contains("text/plain", "text/html", NUMBER)
                 .doesNotContain("Synthetic title", "Synthetic description", "Synthetic reporter",
@@ -206,15 +341,31 @@ class IncidentEmailDetailTests {
         }
 
         void send(String department, IssueType issueType) {
+            send(NUMBER, department, issueType);
+        }
+
+        void send(String incidentNumber, String department, IssueType issueType) {
+            send(new IncidentCreated(incidentNumber, "Synthetic title", "Synthetic reporter", department,
+                    issueType, Severity.LOW, Priority.HIGH, LocalDateTime.parse("2026-11-07T12:00:00"),
+                    "Synthetic description", "Synthetic handler", IncidentStatus.OPEN,
+                    LocalDateTime.parse("2026-11-07T12:01:00")));
+        }
+
+        void enableRoutineRouting() {
+            env.setProperty("app.notifications.email.v2.routine-routing-enabled", "true");
+        }
+
+        void send(IncidentCreated event) {
+            send(event, IT);
+        }
+
+        void send(IncidentCreated event, String itRecipients) {
             var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test",
-                    IT, HR, String.join(",", IT, HR, OPS, HR_CASE));
+                    itRecipients, HR, String.join(",", IT, HR, OPS, HR_CASE));
             new IncidentEmailConfiguration().incidentEmailNotifications(settings, env,
                     beans.getBeanProvider(JavaMailSender.class),
                     beans.getBeanProvider(IncidentEmailDetailAuthority.class), Runnable::run)
-                    .created(new IncidentCreated(NUMBER, "Synthetic title", "Synthetic reporter", department,
-                            issueType, Severity.LOW, Priority.HIGH, LocalDateTime.parse("2026-11-07T12:00:00"),
-                            "Synthetic description", "Synthetic handler", IncidentStatus.OPEN,
-                            LocalDateTime.parse("2026-11-07T12:01:00")));
+                    .created(event);
         }
 
         String wire(String recipient) throws Exception {

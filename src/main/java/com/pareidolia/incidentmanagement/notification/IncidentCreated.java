@@ -9,7 +9,14 @@ import java.time.LocalDateTime;
 /** Immutable snapshot captured from persisted incident and authenticated account. */
 public record IncidentCreated(String incidentNumber, String title, String reporterName,
         String reporterDepartment, IssueType issueType, Severity severity, Priority priority, LocalDateTime reportedAt,
-        String description, String assignedHandler, IncidentStatus status, LocalDateTime createdAt) {
+        String description, String assignedHandler, IncidentStatus status, LocalDateTime createdAt,
+        String category, String affectedSystem, String impactedUserOrDepartment) {
+    public IncidentCreated(String incidentNumber, String title, String reporterName, String reporterDepartment,
+            IssueType issueType, Severity severity, Priority priority, LocalDateTime reportedAt,
+            String description, String assignedHandler, IncidentStatus status, LocalDateTime createdAt) {
+        this(incidentNumber, title, reporterName, reporterDepartment, issueType, severity, priority, reportedAt,
+                description, assignedHandler, status, createdAt, null, null, null);
+    }
     public IncidentCreated(String incidentNumber, String title, String reporterName, String reporterDepartment,
             IssueType issueType, Severity severity, Priority priority, LocalDateTime reportedAt) {
         this(incidentNumber, title, reporterName, reporterDepartment, issueType, severity, priority, reportedAt,
