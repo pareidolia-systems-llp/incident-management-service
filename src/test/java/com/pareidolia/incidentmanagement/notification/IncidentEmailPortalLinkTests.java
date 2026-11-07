@@ -67,10 +67,10 @@ class IncidentEmailPortalLinkTests {
                 "Operations (Annotation)=ops1@example.test,ops2@example.test;Operations (Perioperative Flow Analysis)=ops1@example.test,ops2@example.test;R&D=research@example.test;HR=HR@example.test")));
         var settings = new IncidentEmailNotifications.Settings(true,"sender@example.test","it@example.test",
                 "hr@example.test,IT@example.test","it@example.test,hr@example.test,ops1@example.test,ops2@example.test,research@example.test");
-        var notifications = new IncidentEmailNotifications(settings,env,beans.getBeanProvider(JavaMailSender.class),Runnable::run);
-        for (String department : List.of("Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D","HR")) {
+        var notifications = IncidentEmailTestSupport.trustedItNotifier(settings,env,beans.getBeanProvider(JavaMailSender.class),Runnable::run);
+        for (String department : List.of("Operations (Annotation)","Operations (Perioperative Flow Analysis)","R&D")) {
             sender.messages.clear();
-            notifications.created(new IncidentCreated("INC-2026-20261106-120000-ABCDEF12","private title","private reporter",department,null,null,null,null));
+            notifications.created(new IncidentCreated("INC-2026-20261106-120000-ABCDEF12","private title","private reporter",department,com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE,null,null,null));
             var expected = new HashSet<>(Set.of("it@example.test","hr@example.test"));
             if (department.startsWith("Operations")) expected.addAll(Set.of("ops1@example.test","ops2@example.test"));
             if (department.equals("R&D")) expected.add("research@example.test");

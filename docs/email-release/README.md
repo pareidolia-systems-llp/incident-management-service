@@ -1,5 +1,7 @@
 # Email-only V2 portal-link release
 
+The release instructions below describe the historical portal-link release. The detailed-email branch has a separate opt-in routine policy. See [Routine IT and HR routing](#routine-it-and-hr-routing) for its rollout prerequisites.
+
 Branch codex/email-v2-portal-link starts at verified GitHub backend main 2e61571cb7fdd182f1f57ccfe36d31c83c14ea2d. No commits or pushes were made during preparation. The source email-notifications-v2 worktree is retained intact.
 
 ## Integration and deliberate differences
@@ -158,3 +160,33 @@ Offline Maven package passed. The isolated frontend App.test.jsx routing suite p
 - src/test/java/com/pareidolia/incidentmanagement/notification/IncidentEmailV2Tests.java
 
 Synthetic preview files are review artifacts only. Their portal.example.test destination must be replaced by the approved production origin through configuration, never by editing template literals.
+
+## Trusted case routing on the detailed-email branch
+
+The production-compatible incident model has IT issues, service requests and security issue types. It has no trusted HR case marker. The reporter department, title, description and issue type cannot establish an HR or ordinary IT route. An explicitly reported security type only suppresses email.
+
+Outside the opt-in routine mode, the listener requires exactly one trusted `IncidentEmailDetailAuthority` for all incident emails, including the legacy transport path. The authority must return a consistent case-specific decision using the incident number, based on independent case data and exact approved mailbox addresses. Missing, unknown, ambiguous or failed decisions withhold mail. This is an intentional change from the current production branch, which sends generic V2 mail without an authority.
+
+- Trusted ordinary IT cases classified STANDARD use configured global IT and HR recipients and, in V2, configured reporter-department recipients. Addresses are deduplicated. Approved addresses receive detail only with the explicit V2 details opt-in and a trusted portal origin. Other configured recipients receive the existing generic notice.
+- Trusted HR cases have one possible recipient, `schakravorty@pareidolia.in`. The global and departmental settings cannot add recipients to that route. Full details require trusted STANDARD classification and exact mailbox approval. Otherwise an explicit minimal-disclosure decision is required, and the notice contains no incident number or case details.
+- Security, unknown routing, and non-STANDARD ordinary IT cases withhold email. There is no security recipient policy.
+
+The branch registers no production authority. Keep the running generic V2 release until the replacement is independently verified. Before rollout, approve the authoritative classification and routing workflow, exact-recipient and HR minimal-disclosure rules, and handling for cases approved after creation. The after-commit listener sends only on creation and does not replay withheld messages. Detailed delivery remains disabled by default.
+
+### Authority integration prerequisite
+
+The legacy Reclassify Incident action updates the issue type and records its history. It cannot certify an HR route, a confidentiality classification, or permission to disclose information by email. The authenticated reporter's identity, default IT owner and configured recipient mappings cannot certify those facts either. A department-only or issue-type-only fallback can expose a confidential HR incident to the global lists even in generic mode.
+
+The smallest independent authority would read one approved decision per persisted incident number from a server-controlled case intake or review process. The decision must identify the route and confidentiality classification, list exact mailboxes approved for full disclosure, and explicitly approve any HR-only minimal notice. The organization must designate the source, its approvers, and when their decision becomes available. This branch contains no such data source. The separate guarded incident-access work models confidentiality and portal grants, but those grants do not approve email disclosure or establish an HR route.
+
+Incident numbers are generated during creation and the email listener runs after commit. A static per-case list cannot reliably authorize newly created incidents at that point. If the trusted review happens later, a separately authorized and tested post-review send path is required. In authority mode a missing decision withholds email, including when the reporter labels a confidential case as an ordinary IT issue.
+
+## Routine IT and HR routing
+
+Routine routing is off by default. Enable `INCIDENT_EMAIL_V2_ROUTINE_ROUTING_ENABLED=true` with V2 only after approving the use of this intake form for routine requests. With no case authority installed, ordinary IT issues and service requests use configured global IT, global HR and reporter-department destinations, deduplicated. Set `INCIDENT_EMAIL_V2_DETAILS_ENABLED=true` and a valid portal origin to include the full detailed template for those destinations. An installed case authority takes precedence, including when its decision is absent, ambiguous, or fails.
+
+An explicit `HR_ISSUE` or detected HR hint uses only the designated HR mailbox. Routine mode sends a minimal notice with no case identifier or content. Security issue types, detected security hints, and a missing issue type suppress email. HR hints include department, category, affected system, impact, and a limited keyword scan of the title and description. Security hints take precedence over HR hints. These checks narrow delivery and do not establish confidentiality. The service cannot independently verify that arbitrary free text is safe, and it can miss confidential content that contains no recognized hint. Enable detailed routine mail only if the organization accepts that residual risk. Keep confidential cases out of this form and use the designated direct contact.
+
+The frontend HR choice is off by default. Enable `VITE_ROUTINE_HR_ISSUES_ENABLED=true` only with a matching backend that recognizes `HR_ISSUE` and enforces HR-only routing. Phase A responsible-department metadata is not present in the email-only backend. Before reconciling these branches, carry a server-resolved HR department signal into the email boundary as a narrowing hint. It must never authorize disclosure. The frontend warns users about confidential HR content, but it does not change portal visibility, default incident ownership, or case access.
+
+Before rollout, inspect the actual MySQL `incidents.issue_type` definition. The Java mapping stores enum names. An unconstrained VARCHAR that accepts `HR_ISSUE` needs no column change. A native ENUM or CHECK constraint listing the old values needs a reviewed schema update before any HR issue is saved. Verify schema validation and rollback compatibility on disposable MySQL. An old backend cannot read an incident stored with an enum value it does not recognize.

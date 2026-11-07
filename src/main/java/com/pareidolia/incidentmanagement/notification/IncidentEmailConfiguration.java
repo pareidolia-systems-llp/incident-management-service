@@ -59,7 +59,9 @@ public class IncidentEmailConfiguration {
     }
     @Bean IncidentEmailNotifications incidentEmailNotifications(IncidentEmailNotifications.Settings settings,
             Environment env,org.springframework.beans.factory.ObjectProvider<JavaMailSender> senders,
+            org.springframework.beans.factory.ObjectProvider<IncidentEmailDetailAuthority> authorities,
             @org.springframework.beans.factory.annotation.Qualifier("incidentEmailExecutor") java.util.concurrent.Executor executor) {
-        return new IncidentEmailNotifications(settings,env,senders,executor);
+        return new IncidentEmailNotifications(settings, env, senders, executor,
+                new IncidentEmailDetailPolicy(env, authorities::stream));
     }
 }
