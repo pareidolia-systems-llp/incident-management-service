@@ -13,4 +13,5 @@ public class AuthenticatedUserResponseDto {
     private String email;
     private String displayName;
     private AppUserRole role;
+    private boolean canManageEmployees;
 }
