@@ -45,6 +45,7 @@ class IncidentLocationTests {
     @Autowired IncidentRepository repository;
     @Autowired IncidentHistoryRepository historyRepository;
     @Autowired EntityManager entityManager;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate db;
     @MockitoBean AppUserService users;
     private MockMvc mvc;
     private final JsonMapper json = JsonMapper.builder().build();
@@ -55,7 +56,8 @@ class IncidentLocationTests {
         reporter.setEmail("reporter@example.test");
         reporter.setRole(AppUserRole.REPORTER);
         when(users.getAuthenticatedUser()).thenReturn(reporter);
-        mvc = MockMvcBuilders.standaloneSetup(new IncidentController(service))
+        mvc = MockMvcBuilders.standaloneSetup(new IncidentController(service),
+                new com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController(repository, users))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 
@@ -76,6 +78,67 @@ class IncidentLocationTests {
                         .content(json.writeValueAsString(body)))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         return json.readTree(response).get("id").asLong();
+    }
+
+    private void seedResponsibleDepartments() {
+        db.execute("create table if not exists employee_departments (id bigint primary key, display_name varchar(150), active tinyint)");
+        db.update("insert into employee_departments values (71, 'IT', 1), (72, 'HR', 1), (73, 'Archived', 0)");
+    }
+
+    @Test
+    void responsibleDepartmentLookupAndIncidentRoundTrip() throws Exception {
+        seedResponsibleDepartments();
+        mvc.perform(get("/api/incidents/responsible-departments"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].id").value(72))
+                .andExpect(jsonPath("$[0].displayName").value("HR"))
+                .andExpect(jsonPath("$[1].id").value(71));
+
+        var body = request();
+        body.put("reporterDepartment", "R&D");
+        body.put("responsibleDepartmentId", 71);
+        String response = mvc.perform(post("/api/incidents").contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(body)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reporterDepartment").value("R&D"))
+                .andExpect(jsonPath("$.responsibleDepartmentId").value(71))
+                .andExpect(jsonPath("$.status").value("ASSIGNED"))
+                .andReturn().getResponse().getContentAsString();
+        long id = json.readTree(response).get("id").asLong();
+        entityManager.flush();
+        entityManager.clear();
+        mvc.perform(get("/api/incidents/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reporterDepartment").value("R&D"))
+                .andExpect(jsonPath("$.responsibleDepartmentId").value(71));
+        assertThat(repository.findById(id).orElseThrow().getResponsibleDepartmentId()).isEqualTo(71L);
+    }
+
+    @Test
+    void oldRequestsAndIncidentsAllowAnAbsentDepartment() throws Exception {
+        long id = create(request());
+        assertThat(repository.findById(id).orElseThrow().getResponsibleDepartmentId()).isNull();
+        mvc.perform(get("/api/incidents/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.responsibleDepartmentId").doesNotExist());
+        var explicitNull = request();
+        explicitNull.put("responsibleDepartmentId", null);
+        assertThat(repository.findById(create(explicitNull)).orElseThrow().getResponsibleDepartmentId()).isNull();
+    }
+
+    @Test
+    void invalidResponsibleDepartmentsAreRejectedBeforeWriting() throws Exception {
+        seedResponsibleDepartments();
+        long before = repository.count();
+        for (Object invalid : java.util.List.of(73, 999, 0, -1, 71.5, "71")) {
+            var body = request();
+            body.put("responsibleDepartmentId", invalid);
+            mvc.perform(post("/api/incidents").contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(body)))
+                    .andExpect(status().isBadRequest());
+        }
+        assertThat(repository.count()).isEqualTo(before);
     }
 
     private void setStatus(long id, IncidentStatus status) {

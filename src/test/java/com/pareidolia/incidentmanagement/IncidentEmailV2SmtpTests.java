@@ -30,8 +30,8 @@ import static org.mockito.Mockito.*;
  "spring.jpa.hibernate.ddl-auto=create-drop","spring.jpa.show-sql=false","app.department-routing.enabled=false","app.notifications.in-app.enabled=false",
  "app.notifications.email.v2.enabled=true","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
  "app.notifications.email.it-recipients=oversight@example.test,blocked@example.test","app.notifications.email.hr-recipients=oversight@example.test",
- "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test",
- "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test",
+ "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test,hr-department@example.test",
+ "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test;HR=hr-department@example.test",
  "app.notifications.email.smtp.host=127.0.0.1",
  "app.notifications.email.smtp.username=","app.notifications.email.smtp.password=","app.notifications.email.smtp.starttls=false"})
 @org.springframework.test.context.event.RecordApplicationEvents
@@ -47,6 +47,7 @@ class IncidentEmailV2SmtpTests {
     @Autowired IncidentHistoryRepository history;
     @Autowired jakarta.persistence.EntityManager em;
     @Autowired PlatformTransactionManager transactions;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate db;
     @Autowired ThreadPoolTaskExecutor incidentEmailExecutor;
     @Autowired org.springframework.mail.javamail.JavaMailSender mailSender;
     @MockitoBean AppUserService users;
@@ -82,11 +83,15 @@ class IncidentEmailV2SmtpTests {
     @Test void departmentMessagesUseSeparateRecipientsAndRemainGeneric() throws Exception {
         var request=request();request.setReporterDepartment("Operations (Annotation)");
         request.setIssueType(IssueType.INFORMATION_SECURITY_INCIDENT);
+        db.execute("create table if not exists employee_departments (id bigint primary key, display_name varchar(150), active tinyint)");
+        db.update("insert into employee_departments values (72, 'HR', 1)");
+        request.setResponsibleDepartmentId(72L);
         incidents.createIncident(request);drain();
         assertThat(CAPTURE.messages).hasSize(3);
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: oversight@example.test")).hasSize(1);
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: annotations@example.test")).hasSize(1);
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: annotations02@example.test")).hasSize(1);
+        assertThat(CAPTURE.messages).noneMatch(m -> m.contains("hr-department@example.test"));
         for(String message:CAPTURE.messages) {
             assertThat(message).contains("text/plain","text/html","New incident created")
                     .doesNotContain("private HR title","confidential complaint","Synthetic Reporter", "Operations (Annotation)");

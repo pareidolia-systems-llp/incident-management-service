@@ -60,6 +60,9 @@ public class Incident {
     @Column(name = "reporter_department", length = 150)
     private String reporterDepartment;
 
+    @Column(name = "responsible_department_id")
+    private Long responsibleDepartmentId;
+
     @Size(max = 255)
     @Column(name = "desk_number", length = 255)
     private String deskNumber;

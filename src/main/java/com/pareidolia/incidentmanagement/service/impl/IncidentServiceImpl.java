@@ -9,6 +9,7 @@ import com.pareidolia.incidentmanagement.enums.HistoryActionType;
 import com.pareidolia.incidentmanagement.enums.IncidentStatus;
 import com.pareidolia.incidentmanagement.exception.IncidentNotFoundException;
 import com.pareidolia.incidentmanagement.exception.InvalidIncidentStateException;
+import com.pareidolia.incidentmanagement.exception.InvalidRequestException;
 import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.repository.IncidentHistoryRepository;
 import com.pareidolia.incidentmanagement.repository.IncidentRepository;
@@ -62,6 +63,12 @@ public class IncidentServiceImpl implements IncidentService {
     public IncidentResponseDto createIncident(CreateIncidentRequestDto request) {
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.REPORTER, AppUserRole.ADMIN);
+
+        Long departmentId = request.getResponsibleDepartmentId();
+        if (departmentId != null && (departmentId <= 0
+                || incidentRepository.lockActiveResponsibleDepartment(departmentId).isEmpty())) {
+            throw new InvalidRequestException("Select an active responsible department.");
+        }
 
         Incident incident = incidentMapper.toEntity(request);
         incident.setReportedBy(actor.getEmail());

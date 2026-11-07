@@ -49,9 +49,13 @@ class AuthenticationFlowTests {
     @EnableWebMvc
     @Import({SecurityConfig.class, AuthController.class,
             com.pareidolia.incidentmanagement.controller.WorkLogController.class,
-            com.pareidolia.incidentmanagement.controller.IncidentAttachmentController.class})
+            com.pareidolia.incidentmanagement.controller.IncidentAttachmentController.class,
+            com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController.class})
     static class Config {
         @Bean AppUserService users() { return mock(AppUserService.class); }
+        @Bean com.pareidolia.incidentmanagement.repository.IncidentRepository incidents() {
+            return mock(com.pareidolia.incidentmanagement.repository.IncidentRepository.class);
+        }
         @Bean com.pareidolia.incidentmanagement.service.WorkLogService workLogs() {
             return mock(com.pareidolia.incidentmanagement.service.WorkLogService.class);
         }
@@ -87,6 +91,16 @@ class AuthenticationFlowTests {
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(securityFilter).build();
         reset(users);
+    }
+
+    @Test
+    void responsibleDepartmentLookupRequiresAnAuthenticatedSession() throws Exception {
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/incidents/responsible-departments"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isUnauthorized());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/incidents/responsible-departments").session(authenticatedSession()))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
     }
 
     private MockHttpSession authenticatedSession() {

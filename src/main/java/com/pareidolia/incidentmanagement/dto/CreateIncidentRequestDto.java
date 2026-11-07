@@ -6,6 +6,9 @@ import com.pareidolia.incidentmanagement.enums.Severity;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Positive;
+import com.fasterxml.jackson.annotation.JsonSetter;
+import tools.jackson.databind.JsonNode;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -18,6 +21,21 @@ public class CreateIncidentRequestDto {
 
     @Size(max = 150)
     private String reporterDepartment;
+
+    @Positive
+    private Long responsibleDepartmentId;
+
+    @JsonSetter("responsibleDepartmentId")
+    public void readResponsibleDepartmentId(JsonNode value) {
+        if (value == null || value.isNull()) {
+            responsibleDepartmentId = null;
+            return;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw new IllegalArgumentException("Responsible department ID must be an integer.");
+        }
+        responsibleDepartmentId = value.longValue();
+    }
 
     @Size(max = 255)
     private String deskNumber;
