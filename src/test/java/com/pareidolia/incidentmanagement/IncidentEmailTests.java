@@ -20,7 +20,7 @@ class IncidentEmailTests {
     private IncidentEmailNotifications notifier(boolean enabled,String it,String hr,String allowed,MockEnvironment env,java.util.concurrent.Executor executor) {
         @SuppressWarnings("unchecked") ObjectProvider<JavaMailSender> provider=mock(ObjectProvider.class);
         when(provider.getIfUnique()).thenReturn(sender);
-        return new IncidentEmailNotifications(new IncidentEmailNotifications.Settings(enabled,"sender@example.test",it,hr,allowed),env,provider,executor);
+        return IncidentEmailTestSupport.trustedItNotifier(new IncidentEmailNotifications.Settings(enabled,"sender@example.test",it,hr,allowed),env,provider,executor);
     }
     private MockEnvironment dev() {var env=new MockEnvironment();env.setActiveProfiles("dev");return env;}
     @Test void disabledStartsWithoutSmtpConfigurationAndDoesNotQueue() {
@@ -28,12 +28,12 @@ class IncidentEmailTests {
             assertThat(context).hasNotFailed().hasSingleBean(IncidentEmailNotifications.class).doesNotHaveBean(JavaMailSender.class);
         });
         var executor=mock(java.util.concurrent.Executor.class);
-        notifier(false,"allowed@example.test","","allowed@example.test",dev(),executor).created(new IncidentCreated(number));
+        notifier(false,"allowed@example.test","","allowed@example.test",dev(),executor).created(IncidentEmailTestSupport.itEvent(number));
         verifyNoInteractions(executor,sender);
     }
     @Test void finalAllowlistFiltersAndDeduplicatesRecipients() {
         notifier(true,"ALLOWED@example.test,blocked@example.test"," allowed@example.test ","allowed@example.test",dev(),Runnable::run)
-            .created(new IncidentCreated(number));
+            .created(IncidentEmailTestSupport.itEvent(number));
         var capture=org.mockito.ArgumentCaptor.forClass(SimpleMailMessage.class);verify(sender).send(capture.capture());
         var message=capture.getValue();assertThat(message.getTo()).containsExactly("allowed@example.test");
         assertThat(message.getCc()).isNull();assertThat(message.getBcc()).isNull();
@@ -41,30 +41,30 @@ class IncidentEmailTests {
         assertThat(message.getText()).isEqualTo("A new incident was created: "+number+".\nSign in to the incident management portal to review it.");
     }
     @Test void emptyRecipientsAndEmptyAllowlistSendNothing() {
-        notifier(true,"","","allowed@example.test",dev(),Runnable::run).created(new IncidentCreated(number));
-        notifier(true,"allowed@example.test","","",dev(),Runnable::run).created(new IncidentCreated(number));
+        notifier(true,"","","allowed@example.test",dev(),Runnable::run).created(IncidentEmailTestSupport.itEvent(number));
+        notifier(true,"allowed@example.test","","",dev(),Runnable::run).created(IncidentEmailTestSupport.itEvent(number));
         verifyNoInteractions(sender);
     }
     @Test void missingDevOrProductionProfilesFailClosed() {
         for(String[] profiles:new String[][]{{"test"},{"dev","prod"},{"dev","production"}}) {
             var env=new MockEnvironment();env.setActiveProfiles(profiles);
-            notifier(true,"allowed@example.test","","allowed@example.test",env,Runnable::run).created(new IncidentCreated(number));
+            notifier(true,"allowed@example.test","","allowed@example.test",env,Runnable::run).created(IncidentEmailTestSupport.itEvent(number));
         }
         verifyNoInteractions(sender);
     }
     @Test void invalidAddressesAndTicketHeadersCannotSend() {
-        notifier(true,"allowed@example.test\r\nBcc: other@example.test","","allowed@example.test",dev(),Runnable::run).created(new IncidentCreated(number));
-        notifier(true,"allowed@example.test","","allowed@example.test",dev(),Runnable::run).created(new IncidentCreated(number+"\r\nsecret"));
+        notifier(true,"allowed@example.test\r\nBcc: other@example.test","","allowed@example.test",dev(),Runnable::run).created(IncidentEmailTestSupport.itEvent(number));
+        notifier(true,"allowed@example.test","","allowed@example.test",dev(),Runnable::run).created(IncidentEmailTestSupport.itEvent(number+"\r\nsecret"));
         verifyNoInteractions(sender);
     }
     @Test void smtpFailureIsSanitized(CapturedOutput output) {
         doThrow(new MailSendException("SMTP_PASSWORD private-description reporter-identity")).when(sender).send(any(SimpleMailMessage.class));
-        assertThatCode(() -> notifier(true,"allowed@example.test","","allowed@example.test",dev(),Runnable::run).created(new IncidentCreated(number))).doesNotThrowAnyException();
+        assertThatCode(() -> notifier(true,"allowed@example.test","","allowed@example.test",dev(),Runnable::run).created(IncidentEmailTestSupport.itEvent(number))).doesNotThrowAnyException();
         assertThat(output.getAll()).contains("Incident email delivery failed.").doesNotContain("SMTP_PASSWORD","private-description","reporter-identity");
     }
     @Test void queueFailureCannotEscapeCommitCallback() {
         java.util.concurrent.Executor executor=task -> {throw new RejectedExecutionException("full");};
-        assertThatCode(() -> notifier(true,"allowed@example.test","","allowed@example.test",dev(),executor).created(new IncidentCreated(number))).doesNotThrowAnyException();
+        assertThatCode(() -> notifier(true,"allowed@example.test","","allowed@example.test",dev(),executor).created(IncidentEmailTestSupport.itEvent(number))).doesNotThrowAnyException();
         verifyNoInteractions(sender);
     }
 }

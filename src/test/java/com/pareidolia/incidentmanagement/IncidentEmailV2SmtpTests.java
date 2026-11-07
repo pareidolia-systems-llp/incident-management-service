@@ -28,10 +28,10 @@ import static org.mockito.Mockito.*;
 
 @DataJpaTest(properties={"spring.datasource.url=jdbc:h2:mem:smtp_capture_test;DB_CLOSE_DELAY=-1","spring.datasource.username=sa","spring.datasource.password=",
  "spring.jpa.hibernate.ddl-auto=create-drop","spring.jpa.show-sql=false","app.department-routing.enabled=false","app.notifications.in-app.enabled=false",
- "app.notifications.email.v2.enabled=true","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
+ "app.notifications.email.v2.enabled=true","app.notifications.email.v2.routine-routing-enabled=true","app.notifications.email.v2.details-enabled=false","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
  "app.notifications.email.it-recipients=oversight@example.test,blocked@example.test","app.notifications.email.hr-recipients=oversight@example.test",
- "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test,hr-department@example.test",
- "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test;HR=hr-department@example.test",
+ "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test,schakravorty@pareidolia.in,it-department@example.test,unrelated-hr@example.test",
+ "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test;HR=unrelated-hr@example.test;IT=it-department@example.test",
  "app.notifications.email.smtp.host=127.0.0.1",
  "app.notifications.email.smtp.username=","app.notifications.email.smtp.password=","app.notifications.email.smtp.starttls=false"})
 @org.springframework.test.context.event.RecordApplicationEvents
@@ -59,13 +59,13 @@ class IncidentEmailV2SmtpTests {
     @AfterEach void cleanup() throws Exception { drain();new TransactionTemplate(transactions).executeWithoutResult(s->{history.deleteAll();repository.findAll().forEach(em::remove);}); }
     @AfterAll static void stop() throws Exception { CAPTURE.close(); }
     void drain() throws Exception { incidentEmailExecutor.getThreadPoolExecutor().submit(()->{}).get(8,TimeUnit.SECONDS); }
-    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private HR title");r.setDescription("confidential complaint");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
+    CreateIncidentRequestDto request() { var r=new CreateIncidentRequestDto();r.setTitle("private incident title");r.setDescription("private diagnostic notes");r.setReporterDepartment("private department");r.setAffectedSystem("private system");r.setIssueType(IssueType.IT_ISSUE);r.setSeverity(Severity.LOW);r.setPriority(Priority.LOW);return r; }
     @Test void committedCreationSendsOneGenericMessageToAllowlistedRecipient() throws Exception {
         assertThat(mailSender).isInstanceOf(org.springframework.mail.javamail.JavaMailSenderImpl.class);
         var result=new TransactionTemplate(transactions).execute(s->{var incident=incidents.createIncident(request());assertThat(CAPTURE.messages).isEmpty();return incident;});
         drain();assertThat(CAPTURE.messages).hasSize(1);String msg=CAPTURE.messages.get(0);
         assertThat(msg).contains("Subject: New incident created",result.getIncidentNumber(),"Sign in to the incident management portal","text/plain","text/html","https://portal.example.test/","Open Incident Management Portal");
-        assertThat(msg).doesNotContain("private HR title","confidential complaint","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
+        assertThat(msg).doesNotContain("private incident title","private diagnostic notes","reporter@example.test","private department","private system","SYNTHETIC-EMP","blocked@example.test","Content-Disposition: attachment");
     }
     @Test void creationPublishesSavedMetadataAndAuthenticatedReporter() throws Exception {
         var created=incidents.createIncident(request());drain();
@@ -74,6 +74,10 @@ class IncidentEmailV2SmtpTests {
         var event=events.get(0);var saved=repository.findById(created.getId()).orElseThrow();
         assertThat(event.incidentNumber()).isEqualTo(saved.getIncidentNumber());
         assertThat(event.title()).isEqualTo(saved.getTitle());
+        assertThat(event.description()).isEqualTo(saved.getDescription());
+        assertThat(event.assignedHandler()).isEqualTo(saved.getAssignedOwner());
+        assertThat(event.status()).isEqualTo(saved.getStatus());
+        assertThat(event.createdAt()).isCloseTo(saved.getCreatedAt(), within(1, java.time.temporal.ChronoUnit.MILLIS));
         assertThat(event.reporterName()).isEqualTo("Synthetic Reporter");
         assertThat(event.reporterDepartment()).isEqualTo(saved.getReporterDepartment());
         assertThat(event.issueType()).isEqualTo(saved.getIssueType());
@@ -82,23 +86,64 @@ class IncidentEmailV2SmtpTests {
     }
     @Test void departmentMessagesUseSeparateRecipientsAndRemainGeneric() throws Exception {
         var request=request();request.setReporterDepartment("Operations (Annotation)");
-        request.setIssueType(IssueType.INFORMATION_SECURITY_INCIDENT);
-        db.execute("create table if not exists employee_departments (id bigint primary key, display_name varchar(150), active tinyint)");
-        db.update("insert into employee_departments values (72, 'HR', 1)");
-        request.setResponsibleDepartmentId(72L);
-        incidents.createIncident(request);drain();
+        seedDepartments();
+        request.setResponsibleDepartmentId(71L);
+        var created = incidents.createIncident(request);drain();
+        assertThat(created.getResponsibleDepartmentId()).isEqualTo(71L);
+        assertThat(created.getReporterDepartment()).isEqualTo("Operations (Annotation)");
         assertThat(CAPTURE.messages).hasSize(3);
+        assertThat(CAPTURE.messages).noneMatch(message -> message.contains("it-department@example.test"));
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: oversight@example.test")).hasSize(1);
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: annotations@example.test")).hasSize(1);
         assertThat(CAPTURE.messages).filteredOn(m -> m.contains("To: annotations02@example.test")).hasSize(1);
-        assertThat(CAPTURE.messages).noneMatch(m -> m.contains("hr-department@example.test"));
         for(String message:CAPTURE.messages) {
             assertThat(message).contains("text/plain","text/html","New incident created")
-                    .doesNotContain("private HR title","confidential complaint","Synthetic Reporter", "Operations (Annotation)");
+                    .doesNotContain("private incident title","private diagnostic notes","Synthetic Reporter", "Operations (Annotation)");
             assertThat(message.lines().filter(line -> line.startsWith("To: ")).count()).isEqualTo(1);
             assertThat(message).doesNotContain("\nCc:","\nBcc:");
         }
     }
+    @Test
+    void catalogHrSelectionNarrowsItIssueToMinimalHrOnlyMail() throws Exception {
+        seedDepartments();
+        var request = request();
+        request.setReporterDepartment("Operations (Annotation)");
+        request.setResponsibleDepartmentId(72L);
+        var created = incidents.createIncident(request);
+        drain();
+
+        assertThat(created.getResponsibleDepartmentId()).isEqualTo(72L);
+        assertThat(created.getReporterDepartment()).isEqualTo("Operations (Annotation)");
+        assertThat(created.getAssignedOwner()).isEqualTo("owner@example.test");
+        assertThat(created.getStatus()).isEqualTo(IncidentStatus.ASSIGNED);
+        assertThat(repository.findById(created.getId()).orElseThrow().getResponsibleDepartmentId()).isEqualTo(72L);
+        var event = applicationEvents.stream(com.pareidolia.incidentmanagement.notification.IncidentCreated.class)
+                .findFirst().orElseThrow();
+        assertThat(event.responsibleDepartmentName()).isEqualTo("Human Resources");
+        assertThat(CAPTURE.messages).singleElement().satisfies(message ->
+                assertThat(message).contains("To: schakravorty@pareidolia.in", "text/plain", "text/html",
+                                "https://portal.example.test/")
+                        .doesNotContain(created.getIncidentNumber(), "private diagnostic notes",
+                                "oversight@example.test", "annotations@example.test", "unrelated-hr@example.test"));
+    }
+
+    @Test
+    void securityIssueWithCatalogHrSelectionDoesNotSend() throws Exception {
+        seedDepartments();
+        var request = request();
+        request.setReporterDepartment("Operations (Annotation)");
+        request.setResponsibleDepartmentId(72L);
+        request.setIssueType(IssueType.SUSPECTED_SECURITY_INCIDENT);
+        incidents.createIncident(request);
+        drain();
+        assertThat(CAPTURE.messages).isEmpty();
+    }
+
+    private void seedDepartments() {
+        db.execute("create table if not exists employee_departments (id bigint primary key, display_name varchar(150), active tinyint)");
+        db.update("merge into employee_departments key(id) values (71, 'IT', 1), (72, 'Human Resources', 1)");
+    }
+
     @Test void rollbackDoesNotSend() throws Exception {new TransactionTemplate(transactions).executeWithoutResult(s->{incidents.createIncident(request());s.setRollbackOnly();});drain();assertThat(CAPTURE.messages).isEmpty();assertThat(repository.count()).isZero();}
     @Test void transportFailureDoesNotRollbackIncident() throws Exception {
         CAPTURE.reject=true;try {var created=incidents.createIncident(request());drain();assertThat(repository.existsById(created.getId())).isTrue();assertThat(CAPTURE.messages).isEmpty();} finally {CAPTURE.reject=false;}

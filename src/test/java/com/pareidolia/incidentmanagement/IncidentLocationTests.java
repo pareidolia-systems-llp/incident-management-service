@@ -141,6 +141,20 @@ class IncidentLocationTests {
         assertThat(repository.count()).isEqualTo(before);
     }
 
+    @Test
+    void routineHrTypeAndCategoryRoundTripThroughTheExistingCreateApi() throws Exception {
+        var body = request();
+        body.put("issueType", "HR_ISSUE");
+        body.put("category", "Routine HR Request");
+        long id = create(body);
+        entityManager.flush();
+        entityManager.clear();
+        mvc.perform(get("/api/incidents/{id}", id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.issueType").value("HR_ISSUE"))
+                .andExpect(jsonPath("$.category").value("Routine HR Request"));
+    }
+
     private void setStatus(long id, IncidentStatus status) {
         var incident = repository.findById(id).orElseThrow();
         incident.setStatus(status);

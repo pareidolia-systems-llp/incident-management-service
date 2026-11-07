@@ -26,7 +26,7 @@ class IncidentEmailPostfixTests {
     }
     private void send(String from,String it,String hr,String... profiles) {
         var settings=new IncidentEmailNotifications.Settings(true,from,it,hr,"");
-        new IncidentEmailNotifications(settings,profiles(profiles),providers,Runnable::run).created(new IncidentCreated(NUMBER));
+        IncidentEmailTestSupport.trustedItNotifier(settings,profiles(profiles),providers,Runnable::run).created(IncidentEmailTestSupport.itEvent(NUMBER));
     }
     private ApplicationContextRunner production() {
         return new ApplicationContextRunner().withInitializer(c -> c.getEnvironment().setActiveProfiles("default"))
@@ -69,7 +69,7 @@ class IncidentEmailPostfixTests {
         approvedMail();
         var env = new MockEnvironment();
         var settings = new IncidentEmailNotifications.Settings(true, "alerts@pareidolia.in", "first@example.test", "", "");
-        new IncidentEmailNotifications(settings, env, providers, Runnable::run).created(new IncidentCreated(NUMBER));
+        IncidentEmailTestSupport.trustedItNotifier(settings, env, providers, Runnable::run).created(IncidentEmailTestSupport.itEvent(NUMBER));
         verify(mail, never()).send(any(SimpleMailMessage.class));
     }
     @Test void productionUsesOnlyConfiguredRecipientsAndApprovedSender() {
@@ -98,18 +98,48 @@ class IncidentEmailPostfixTests {
     @Test void productionEventIsQueuedOnlyAfterCommitAndNotAfterRollback() {
         approvedMail();
         var dataSource=new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:postfix_events;DB_CLOSE_DELAY=-1","sa","");
-        production().withUserConfiguration(TransactionEvents.class)
+        production().withUserConfiguration(TransactionEvents.class, IncidentEmailTestSupport.TrustedItConfiguration.class)
             .withBean(org.springframework.transaction.PlatformTransactionManager.class,()->new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource))
             .withBean("syntheticMail",JavaMailSender.class,()->mail,definition->definition.setPrimary(true))
             .withPropertyValues("app.notifications.email.from=alerts@pareidolia.in","app.notifications.email.it-recipients=first@example.test")
             .run(context -> {
                 assertThat(context).hasNotFailed();var transactions=new org.springframework.transaction.support.TransactionTemplate(context.getBean(org.springframework.transaction.PlatformTransactionManager.class));
-                transactions.executeWithoutResult(status->{context.publishEvent(new IncidentCreated(NUMBER));verify(mail,never()).send(any(SimpleMailMessage.class));});
+                transactions.executeWithoutResult(status->{context.publishEvent(IncidentEmailTestSupport.itEvent(NUMBER));verify(mail,never()).send(any(SimpleMailMessage.class));});
                 drain(context);verify(mail,times(1)).send(any(SimpleMailMessage.class));
-                transactions.executeWithoutResult(status->{context.publishEvent(new IncidentCreated(NUMBER));status.setRollbackOnly();});
+                transactions.executeWithoutResult(status->{context.publishEvent(IncidentEmailTestSupport.itEvent(NUMBER));status.setRollbackOnly();});
                 drain(context);verify(mail,times(1)).send(any(SimpleMailMessage.class));
             });
     }
+    @Test
+    void configuredPostfixWithNoAuthorityWithholdsBothLegacyAndV2AfterCommit() {
+        approvedMail();
+        for (boolean v2 : new boolean[]{false, true}) {
+            var dataSource = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                    "jdbc:h2:mem:postfix_without_authority", "sa", "");
+            production().withUserConfiguration(TransactionEvents.class)
+                    .withBean(org.springframework.transaction.PlatformTransactionManager.class,
+                            () -> new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource))
+                    .withBean("syntheticMail", JavaMailSender.class, () -> mail, definition -> definition.setPrimary(true))
+                    .withPropertyValues("app.notifications.email.from=alerts@pareidolia.in",
+                            "app.notifications.email.it-recipients=first@example.test",
+                            "app.notifications.email.hr-recipients=hr@example.test",
+                            "app.notifications.email.v2.enabled=" + v2,
+                            "app.notifications.email.v2.details-enabled=true",
+                            "app.notifications.email.portal-origin=https://portal.example.test",
+                            "app.notifications.email.v2.department-recipients=Operations=ops@example.test")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed().doesNotHaveBean(IncidentEmailDetailAuthority.class);
+                        var transactions = new org.springframework.transaction.support.TransactionTemplate(
+                                context.getBean(org.springframework.transaction.PlatformTransactionManager.class));
+                        transactions.executeWithoutResult(status -> context.publishEvent(new IncidentCreated(
+                                NUMBER, "Synthetic confidential case", null, "Operations",
+                                com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE, null, null, null)));
+                        drain(context);
+                        verifyNoInteractions(mail);
+                    });
+        }
+    }
+
     private static void drain(org.springframework.context.ApplicationContext context) {
         try {context.getBean("incidentEmailExecutor",org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor.class).getThreadPoolExecutor().submit(()->{}).get(5,java.util.concurrent.TimeUnit.SECONDS);}
         catch(Exception failure){throw new AssertionError("Email worker did not finish",failure);}

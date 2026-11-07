@@ -65,9 +65,13 @@ public class IncidentServiceImpl implements IncidentService {
         requireRole(actor, AppUserRole.REPORTER, AppUserRole.ADMIN);
 
         Long departmentId = request.getResponsibleDepartmentId();
-        if (departmentId != null && (departmentId <= 0
-                || incidentRepository.lockActiveResponsibleDepartment(departmentId).isEmpty())) {
-            throw new InvalidRequestException("Select an active responsible department.");
+        String responsibleDepartmentName = null;
+        if (departmentId != null) {
+            if (departmentId <= 0) {
+                throw new InvalidRequestException("Select an active responsible department.");
+            }
+            responsibleDepartmentName = incidentRepository.lockActiveResponsibleDepartmentName(departmentId)
+                    .orElseThrow(() -> new InvalidRequestException("Select an active responsible department."));
         }
 
         Incident incident = incidentMapper.toEntity(request);
@@ -95,7 +99,10 @@ public class IncidentServiceImpl implements IncidentService {
         );
         events.publishEvent(new IncidentCreated(savedIncident.getIncidentNumber(), savedIncident.getTitle(),
                 actor.getDisplayName(), savedIncident.getReporterDepartment(), savedIncident.getIssueType(),
-                savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt()));
+                savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt(),
+                savedIncident.getDescription(), savedIncident.getAssignedOwner(), savedIncident.getStatus(),
+                savedIncident.getCreatedAt(), savedIncident.getCategory(), savedIncident.getAffectedSystem(),
+                savedIncident.getImpactedUserOrDepartment(), responsibleDepartmentName));
         return toResponseDto(savedIncident);
     }
 

@@ -21,9 +21,9 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
             """, nativeQuery = true)
     List<ResponsibleDepartmentOption> findActiveResponsibleDepartments();
 
-    @Query(value = "select id from employee_departments where id = :id and active = 1 for update",
+    @Query(value = "select display_name from employee_departments where id = :id and active = 1 for update",
             nativeQuery = true)
-    Optional<Long> lockActiveResponsibleDepartment(@Param("id") Long id);
+    Optional<String> lockActiveResponsibleDepartmentName(@Param("id") Long id);
 
     @org.springframework.data.jpa.repository.Query("select i from Incident i where i.reportedAt >= :start "
             + "and (i.reportedAt < :end or (:includeEnd = true and i.reportedAt = :end)) "

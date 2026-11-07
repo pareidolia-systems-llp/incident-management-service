@@ -9,21 +9,47 @@ final class IncidentEmailTemplate {
         return render(event, approvedContent, null);
     }
     static Rendered render(IncidentCreated event, boolean approvedContent, String portalOrigin) {
+        return render(event, approvedContent, portalOrigin, null);
+    }
+
+    static Rendered renderHrDetails(IncidentCreated event, String portalOrigin) {
+        return render(event, true, portalOrigin, event.responsibleDepartmentName());
+    }
+
+    private static Rendered render(IncidentCreated event, boolean approvedContent, String portalOrigin,
+            String responsibleDepartment) {
         String portalUrl = IncidentEmailPortalLink.url(portalOrigin);
-        String number=clean(event.incidentNumber(),50);
-        String title=clean(event.title(),120);
-        String subject=approvedContent ? "[New Incident] "+title+" | "+number : "New incident created";
-        StringBuilder plain=new StringBuilder("A new incident was created.\nIncident number: ").append(number);
-        StringBuilder rows=new StringBuilder(row("Incident number",number));
+        String number = event == null ? null : clean(event.incidentNumber(), 50);
+        // Keep incident details out of the subject line.
+        String subject = "New incident created";
+        StringBuilder plain = new StringBuilder("A new incident was created.");
+        StringBuilder rows = new StringBuilder();
+        if (number != null) {
+            plain.append("\nIncident number: ").append(number);
+            rows.append(row("Incident number", number));
+        }
         if (approvedContent) {
-            String[][] values={{"Incident title",event.title()},{"Submitted by",event.reporterName()},
-                {"Reported department",event.reporterDepartment()},{"Issue type",String.valueOf(event.issueType())},
-                {"Severity",String.valueOf(event.severity())},{"Priority",String.valueOf(event.priority())},
-                {"Reported at",String.valueOf(event.reportedAt())}};
-            for (String[] value:values) {
-                String safe=clean(value[1],255);
-                plain.append("\n").append(value[0]).append(": ").append(safe);
-                rows.append(row(value[0],safe));
+            String handler = clean(event.assignedHandler(), 255);
+            String[][] values = {
+                {"Incident title", clean(event.title(), 255)},
+                {"Description", clean(event.description(), 4000)},
+                {"Submitted by", clean(event.reporterName(), 255)},
+                {"Assigned handler", "Not provided".equals(handler) ? "Pending assignment" : handler},
+                {"Reported department", clean(event.reporterDepartment(), 255)},
+                {"Status", clean(String.valueOf(event.status()), 255)},
+                {"Issue type", clean(String.valueOf(event.issueType()), 255)},
+                {"Severity", clean(String.valueOf(event.severity()), 255)},
+                {"Priority", clean(String.valueOf(event.priority()), 255)},
+                {"Created at", clean(String.valueOf(event.createdAt()), 255)}
+            };
+            for (String[] value : values) {
+                plain.append("\n").append(value[0]).append(": ").append(value[1]);
+                rows.append(row(value[0], value[1]));
+            }
+            if (responsibleDepartment != null && !responsibleDepartment.isBlank()) {
+                String department = clean(responsibleDepartment, 255);
+                plain.append("\nResponsible department: ").append(department);
+                rows.append(row("Responsible department", department));
             }
         }
         plain.append("\nSign in to the incident management portal to review it.");
@@ -47,6 +73,10 @@ final class IncidentEmailTemplate {
             +portalLink+"</td></tr></table></td></tr></table></body></html>";
         return new Rendered(subject,plain.toString(),html);
     }
+    static Rendered renderMinimal(String portalOrigin) {
+        return render(null, false, portalOrigin);
+    }
+
     private static String row(String label,String value) {
         return "<tr><th scope=\"row\" style=\"padding:8px;text-align:left;vertical-align:top\">"+HtmlUtils.htmlEscape(label)
                 +"</th><td style=\"padding:8px;overflow-wrap:anywhere\">"+HtmlUtils.htmlEscape(value)+"</td></tr>";
