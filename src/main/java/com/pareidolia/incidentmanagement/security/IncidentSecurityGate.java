@@ -11,6 +11,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 /** Global shared-read/exclusive-write gate. Must precede every account/incident lock. */
 @Component
 public class IncidentSecurityGate {
+    public static final String EXCLUSIVE_LOCK_SQL = "select id from incident_security_lock where id=1 for update";
     private static final ThreadLocal<Map<Object,Boolean>> HELD=ThreadLocal.withInitial(IdentityHashMap::new);
     private final EntityManager em; private final boolean enabled;
     @org.springframework.beans.factory.annotation.Autowired
@@ -44,7 +45,7 @@ public class IncidentSecurityGate {
         Object key=transaction();if(key==null)throw new IllegalStateException("Missing JPA transaction.");
         Boolean existing=HELD.get().get(key);
         if(existing!=null){if(write && !existing)throw new IllegalStateException("Security read-to-write lock upgrades are forbidden.");return;}
-        var rows=em.createNativeQuery("select id from incident_security_lock where id=1"+(write?" for update":sharedClause())).getResultList();
+        var rows=em.createNativeQuery(write ? EXCLUSIVE_LOCK_SQL : "select id from incident_security_lock where id=1" + sharedClause()).getResultList();
         if(rows.size()!=1)throw new IllegalStateException("Incident security lock migration is missing.");
         HELD.get().put(key,write);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization(){

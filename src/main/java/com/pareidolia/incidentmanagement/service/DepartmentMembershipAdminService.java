@@ -7,7 +7,8 @@ import jakarta.persistence.EntityManager;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
-import java.util.TreeSet;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -16,7 +17,9 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
@@ -31,13 +34,21 @@ public class DepartmentMembershipAdminService {
     private final IncidentSecurityGate gate;
     private final IncidentReadSnapshot snapshot;
     private final Set<String> administrators;
+    private final JdbcClient ordinaryJdbc;
+    private final TransactionTemplate ordinaryTransaction;
+    private final MembershipCommandConnection commandConnection;
 
     public DepartmentMembershipAdminService(EntityManager em, AppUserService users, IncidentSecurityGate gate,
-            IncidentReadSnapshot snapshot, @Value("${app.department-membership-admin.allowed-emails:}") String configured) {
+            IncidentReadSnapshot snapshot, DataSource ordinaryDataSource, PlatformTransactionManager transactionManager,
+            ObjectProvider<MembershipCommandConnection> commandConnection,
+            @Value("${app.department-membership-admin.allowed-emails:}") String configured) {
         this.em = em;
         this.users = users;
         this.gate = gate;
         this.snapshot = snapshot;
+        this.ordinaryJdbc = JdbcClient.create(ordinaryDataSource);
+        this.ordinaryTransaction = new TransactionTemplate(transactionManager);
+        this.commandConnection = commandConnection.getIfAvailable();
         this.administrators = Arrays.stream(configured.split(",")).map(AppUserService::normalizeEmail)
                 .filter(email -> !email.isEmpty()).collect(Collectors.toUnmodifiableSet());
     }
@@ -46,7 +57,7 @@ public class DepartmentMembershipAdminService {
         requireId(departmentId);
         return snapshot.read(() -> {
             administrator();
-            requireDepartment(departmentId, false);
+            requireDepartment(departmentId);
             @SuppressWarnings("unchecked")
             List<Object[]> rows = em.createNativeQuery("""
                     select m.user_id, u.display_name, u.email, m.active, m.version
@@ -78,70 +89,82 @@ public class DepartmentMembershipAdminService {
         });
     }
 
-    @Transactional
     public long change(Long departmentId, Long userId, boolean requestedActive, Long expectedVersion, String reason) {
         requireId(departmentId);
         requireId(userId);
         if (expectedVersion == null || expectedVersion < 0 || reason == null || reason.isBlank() || reason.length() > 500) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A version and a reason are required.");
         }
-        AppUser actor = administrator();
-        if (actor.getId().equals(userId)) throw denied();
-
-        gate.write();
-        // Share the assignment gate and lock accounts in ID order before department and membership rows.
-        for (Long id : new TreeSet<>(List.of(actor.getId(), userId))) {
-            var accounts = em.createNativeQuery("select active, email from app_users where id = :id for update")
-                    .setParameter("id", id).getResultList();
-            if (accounts.size() != 1) throw denied();
-            Object[] account = (Object[]) accounts.get(0);
-            if (!active(account[0]) || (id.equals(actor.getId())
-                    && !AppUserService.normalizeEmail(actor.getEmail()).equals(AppUserService.normalizeEmail((String) account[1])))) {
-                throw denied();
-            }
+        String email = administratorEmail();
+        if (commandConnection != null) {
+            return commandConnection.execute(jdbc ->
+                    change(jdbc, " for share", email, departmentId, userId, requestedActive, expectedVersion, reason.trim()));
         }
-        requireDepartment(departmentId, true);
+        return ordinaryTransaction.execute(status -> {
+            gate.write();
+            return change(ordinaryJdbc, gate.sharedClause(), email, departmentId, userId, requestedActive,
+                    expectedVersion, reason.trim());
+        });
+    }
 
-        var rows = em.createNativeQuery("""
+    private long change(JdbcClient jdbc, String sharedLock, String email, long departmentId, long userId,
+            boolean requestedActive, long expectedVersion, String reason) {
+        var actor = jdbc.sql("select id, email, active from app_users where email = :email" + sharedLock)
+                .param("email", email)
+                .query((row, index) -> new Account(row.getLong("id"), row.getString("email"), row.getBoolean("active")))
+                .optional().orElseThrow(DepartmentMembershipAdminService::denied);
+        if (!actor.active() || !email.equals(AppUserService.normalizeEmail(actor.email())) || actor.id() == userId) {
+            throw denied();
+        }
+
+        requireActive(jdbc, "select active from app_users where id = :id" + sharedLock, userId);
+        requireActive(jdbc, "select active from employee_departments where id = :id" + sharedLock, departmentId);
+        var current = jdbc.sql("""
                 select active, version from employee_department_memberships
                 where department_id = :department and user_id = :user for update
-                """).setParameter("department", departmentId).setParameter("user", userId).getResultList();
-        Object[] current = rows.isEmpty() ? null : (Object[]) rows.get(0);
-        long version = current == null ? 0 : number(current[1]);
-        Boolean previous = current == null ? null : active(current[0]);
+                """).param("department", departmentId).param("user", userId)
+                .query((row, index) -> new MembershipState(row.getBoolean("active"), row.getLong("version")))
+                .optional().orElse(null);
+        long version = current == null ? 0 : current.version();
+        Boolean previous = current == null ? null : current.active();
         if (version != expectedVersion || (current == null && !requestedActive)) throw conflict();
         if (previous != null && previous == requestedActive) return version;
 
         long next = Math.addExact(version, 1);
-        if (current == null) {
-            em.createNativeQuery("""
+        int changed = current == null
+                ? jdbc.sql("""
                     insert into employee_department_memberships (department_id, user_id, active, version)
                     values (:department, :user, 1, :next)
-                    """).setParameter("department", departmentId).setParameter("user", userId)
-                    .setParameter("next", next).executeUpdate();
-        } else if (em.createNativeQuery("""
-                update employee_department_memberships set active = :active, version = :next
-                where department_id = :department and user_id = :user and version = :expected
-                """).setParameter("active", requestedActive ? 1 : 0).setParameter("next", next)
-                .setParameter("department", departmentId).setParameter("user", userId)
-                .setParameter("expected", version).executeUpdate() != 1) {
-            throw conflict();
-        }
+                    """).param("department", departmentId).param("user", userId).param("next", next).update()
+                : jdbc.sql("""
+                    update employee_department_memberships set active = :active, version = :next
+                    where department_id = :department and user_id = :user and version = :expected
+                    """).param("active", requestedActive ? 1 : 0).param("next", next)
+                        .param("department", departmentId).param("user", userId).param("expected", version).update();
+        if (changed != 1) throw conflict();
 
-        if (em.createNativeQuery("""
+        if (jdbc.sql("""
                 insert into employee_department_membership_audit
                     (department_id, user_id, actor_user_id, old_active, new_active, membership_version, reason)
                 values (:department, :user, :actor, :old, :active, :version, :reason)
-                """).setParameter("department", departmentId).setParameter("user", userId)
-                .setParameter("actor", actor.getId()).setParameter("old", previous == null ? null : previous ? 1 : 0)
-                .setParameter("active", requestedActive ? 1 : 0).setParameter("version", next)
-                .setParameter("reason", reason.trim()).executeUpdate() != 1) {
+                """).param("department", departmentId).param("user", userId)
+                .param("actor", actor.id()).param("old", previous == null ? null : previous ? 1 : 0, java.sql.Types.TINYINT)
+                .param("active", requestedActive ? 1 : 0).param("version", next).param("reason", reason).update() != 1) {
             throw new IllegalStateException("Department membership audit failed.");
         }
         return next;
     }
 
-    private AppUser administrator() {
+    private record Account(long id, String email, boolean active) { }
+    private record MembershipState(boolean active, long version) { }
+
+    private static void requireActive(JdbcClient jdbc, String sql, long id) {
+        if (!jdbc.sql(sql).param("id", id).query((row, index) -> row.getBoolean("active")).optional().orElse(false)) {
+            throw denied();
+        }
+    }
+
+    private String administratorEmail() {
         var authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !authentication.isAuthenticated()
                 || !(authentication.getPrincipal() instanceof OidcUser oidc) || !Boolean.TRUE.equals(oidc.getEmailVerified())) {
@@ -149,15 +172,20 @@ public class DepartmentMembershipAdminService {
         }
         String email = AppUserService.normalizeEmail(oidc.getEmail());
         if (!administrators.contains(email)) throw denied();
+        return email;
+    }
+
+    private AppUser administrator() {
+        String email = administratorEmail();
         AppUser actor = users.getAuthenticatedUser();
         if (actor.getId() == null || !email.equals(AppUserService.normalizeEmail(actor.getEmail()))) throw denied();
         return actor;
     }
 
-    private void requireDepartment(Long departmentId, boolean lock) {
-        var rows = em.createNativeQuery("select active from employee_departments where id = :id" + (lock ? " for update" : ""))
+    private void requireDepartment(Long departmentId) {
+        var rows = em.createNativeQuery("select id from employee_departments where id = :id")
                 .setParameter("id", departmentId).getResultList();
-        if (rows.size() != 1 || (lock && !active(rows.get(0)))) throw denied();
+        if (rows.size() != 1) throw denied();
     }
 
     private static void requireId(Long id) {
