@@ -34,7 +34,8 @@ public class IncidentController {
     }
 
     @GetMapping
-    public ResponseEntity<List<IncidentResponseDto>> getAllIncidents() {
+    public ResponseEntity<List<IncidentResponseDto>> getAllIncidents(@org.springframework.web.bind.annotation.RequestParam(required=false) Integer page,@org.springframework.web.bind.annotation.RequestParam(required=false) Integer size) {
+        if(page!=null || size!=null)return ResponseEntity.ok(incidentService.getIncidentsPage(page==null?0:page,size==null?100:size));
         return ResponseEntity.ok(incidentService.getAllIncidents());
     }
 

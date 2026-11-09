@@ -14,6 +14,8 @@ import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.repository.IncidentHistoryRepository;
 import com.pareidolia.incidentmanagement.repository.IncidentRepository;
 import com.pareidolia.incidentmanagement.service.IncidentService;
+import com.pareidolia.incidentmanagement.security.IncidentConfidentiality;
+import com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.ReadOperation;
 import com.pareidolia.incidentmanagement.service.AppUserService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
@@ -30,11 +32,31 @@ import java.util.UUID;
 
 @Service
 public class IncidentServiceImpl implements IncidentService {
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentSecurityGate securityGate;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentReadSnapshot readSnapshot;
+    @org.springframework.beans.factory.annotation.Value("${app.incident-access.enabled:false}") private boolean securityGateEnabled;
+    private void securityWrite(){
+        if(securityGateEnabled){if(securityGate==null)throw new IllegalStateException("Security gate unavailable.");securityGate.write();}
+    }
+    private <T> T secureRead(java.util.function.Supplier<T> work){
+        if(!securityGateEnabled)return work.get();
+        if(readSnapshot==null)throw new IllegalStateException("Security snapshot unavailable.");
+        return readSnapshot.read(work);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.service.IncidentAssignmentService employeeAssignment;
+    @Value("${app.incident-assignment.enabled:false}") private boolean employeeAssignmentEnabled;
 
     private static final String SYSTEM_ACTOR = "SYSTEM";
     private static final DateTimeFormatter INCIDENT_YEAR_FORMAT = DateTimeFormatter.ofPattern("yyyy");
     private static final DateTimeFormatter INCIDENT_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy accessPolicy;
+    @Value("${app.incident-access.enabled:false}") private boolean incidentAccessEnabled;
     private final IncidentRepository incidentRepository;
     private final IncidentHistoryRepository incidentHistoryRepository;
     private final IncidentMapper incidentMapper;
@@ -61,6 +83,7 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto createIncident(CreateIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.REPORTER, AppUserRole.ADMIN);
 
@@ -77,10 +100,15 @@ public class IncidentServiceImpl implements IncidentService {
         Incident incident = incidentMapper.toEntity(request);
         incident.setReportedBy(actor.getEmail());
         incident.setIncidentNumber(generateIncidentNumber());
-        incident.setAssignedOwner(defaultItOwner);
-        incident.setStatus(IncidentStatus.ASSIGNED);
+        if(employeeAssignmentEnabled && (!incidentAccessEnabled || employeeAssignment==null))throw new IllegalStateException("Secure assignment dependencies unavailable.");
+        if(!employeeAssignmentEnabled && request.getProposedHandlerUserId()!=null)throw new IllegalArgumentException("Employee assignment is disabled.");
+        boolean pending = incidentAccessEnabled || departmentId != null
+                || IncidentConfidentiality.requiresRestriction(incident, responsibleDepartmentName);
+        incident.setAssignedOwner(pending ? null : defaultItOwner);
+        incident.setStatus(pending ? IncidentStatus.OPEN : IncidentStatus.ASSIGNED);
 
         Incident savedIncident = incidentRepository.save(incident);
+        if(employeeAssignmentEnabled)employeeAssignment.initialize(savedIncident,request.getProposedHandlerUserId());
         recordHistory(
                 savedIncident,
                 HistoryActionType.INCIDENT_CREATED,
@@ -89,7 +117,7 @@ public class IncidentServiceImpl implements IncidentService {
                 actor.getEmail(),
                 null
         );
-        recordHistory(
+        if (!pending) recordHistory(
                 savedIncident,
                 HistoryActionType.OWNER_ASSIGNED,
                 null,
@@ -109,40 +137,56 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional(readOnly = true)
     public IncidentResponseDto getIncident(Long id) {
+        return secureRead(() -> {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
-        ensureCanViewIncident(actor, incident);
+        ensureCanViewIncident(actor, incident, ReadOperation.DETAIL);
         return toResponseDto(incident);
+
+        });
     }
 
     @Override
     @Transactional(readOnly = true)
     public IncidentResponseDto getIncidentByNumber(String incidentNumber) {
+        return secureRead(() -> {
         AppUser actor = getAuthenticatedUser();
         Incident incident = incidentRepository.findByIncidentNumber(incidentNumber)
-                .orElseThrow(() -> new IncidentNotFoundException("Incident not found with number: " + incidentNumber));
-        ensureCanViewIncident(actor, incident);
+                .orElseThrow(() -> new IncidentNotFoundException(incidentAccessEnabled ? "Incident not found." : "Incident not found with number: " + incidentNumber));
+        ensureCanViewIncident(actor, incident, ReadOperation.NUMBER_LOOKUP);
         return toResponseDto(incident);
+
+        });
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<IncidentResponseDto> getAllIncidents() {
+        return secureRead(() -> {
         AppUser actor = getAuthenticatedUser();
-        List<Incident> incidents = actor.getRole() == AppUserRole.REPORTER
-                ? incidentRepository.findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(actor.getEmail())
-                : incidentRepository.findAllByOrderByCreatedAtDescIdDesc();
-        var responses = incidents.stream().map(incidentMapper::toResponseDto).toList();
+        List<Incident> incidents = incidentAccessEnabled
+                ? listCandidates(actor,0,100)
+                : actor.getRole() == AppUserRole.REPORTER
+                  ? incidentRepository.findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(actor.getEmail())
+                  : incidentRepository.findAllByOrderByCreatedAtDescIdDesc();
+        var visible = incidentAccessEnabled ? policyForRead().filterRead(actor,incidents,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW, ReadOperation.LIST) : legacyVisible(actor, incidents);
+        var responses = visible.stream().map(incidentMapper::toResponseDto).toList();
         enrichAttention(responses);
         return responses;
+
+        });
     }
 
     @Override
     @Transactional
     public IncidentResponseDto assignIncident(Long id, AssignIncidentRequestDto request) {
+        if(employeeAssignmentEnabled)throw new AccessDeniedException("Use the employee assignment workflow.");
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.ASSIGN);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "assign");
 
         String oldOwner = incident.getAssignedOwner();
@@ -160,9 +204,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto updateInvestigation(Long id, UpdateInvestigationRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.HANDLE);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "update investigation for");
 
         String oldInvestigationDetails = incident.getInvestigationDetails();
@@ -184,9 +231,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto reclassifyIncident(Long id, ReclassifyIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "reclassify");
 
         String oldIssueType = enumValue(incident.getIssueType());
@@ -200,9 +250,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto changeSeverity(Long id, ChangeSeverityRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "change severity for");
 
         String oldSeverity = enumValue(incident.getSeverity());
@@ -216,9 +269,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto changePriority(Long id, ChangePriorityRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "change priority for");
 
         String oldPriority = enumValue(incident.getPriority());
@@ -232,9 +288,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto escalateIncident(Long id, EscalateIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "escalate");
 
         String oldEscalationDetails = incident.getEscalationDetails();
@@ -249,9 +308,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto updateEvidenceReference(Long id, UpdateEvidenceReferenceRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "update evidence for");
 
         String oldEvidenceReference = incident.getEvidenceReference();
@@ -265,9 +327,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto resolveIncident(Long id, ResolveIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.HANDLE);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         requireStatus(incident, "resolve", IncidentStatus.ASSIGNED, IncidentStatus.IN_PROGRESS);
 
         String oldResolutionDetails = incident.getResolutionDetails();
@@ -283,8 +348,10 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto validateIncident(Long id, ValidateIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW);
         requireOriginalReporter(actor, incident, "validate");
         requireStatus(incident, "validate", IncidentStatus.RESOLVED);
 
@@ -302,8 +369,10 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto submitResolutionFeedback(Long id, ResolutionFeedbackRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW);
         requireOriginalReporter(actor, incident, "submit resolution feedback for");
         requireStatus(incident, "submit resolution feedback for", IncidentStatus.RESOLVED);
 
@@ -321,8 +390,10 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto closeIncident(Long id, CloseIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW);
         requireOriginalReporter(actor, incident, "close");
         requireStatus(incident, "close", IncidentStatus.VALIDATED);
 
@@ -338,9 +409,12 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional
     public IncidentResponseDto reviewIncident(Long id, ReviewIncidentRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.REVIEWER, AppUserRole.ADMIN);
         requireStatus(incident, "review", IncidentStatus.CLOSED);
         if (incident.getReviewedAt() != null) {
             throw new InvalidIncidentStateException("Incident has already been reviewed.");
@@ -365,21 +439,26 @@ public class IncidentServiceImpl implements IncidentService {
     @Override
     @Transactional(readOnly = true)
     public List<IncidentHistoryResponseDto> getIncidentHistory(Long id) {
+        return secureRead(() -> {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
-        ensureCanViewIncident(actor, incident);
+        ensureCanViewIncident(actor, incident, ReadOperation.HISTORY);
         return incidentHistoryRepository.findByIncidentIdOrderByChangedAtAscIdAsc(id).stream()
                 .map(incidentMapper::toHistoryResponseDto)
                 .toList();
+
+        });
     }
 
     @Override
     @Transactional
     public IncidentResponseDto addWorkNote(Long id, AddWorkNoteRequestDto request) {
+        securityWrite();
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
-        ensureCanViewIncident(actor, incident);
+        requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.HANDLE);
+        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         ensureNotClosed(incident, "add a work note to");
         recordHistory(incident, HistoryActionType.WORK_NOTE, null, null,
                 actor.getEmail(), request.remarks().trim());
@@ -410,7 +489,7 @@ public class IncidentServiceImpl implements IncidentService {
 
     private Incident findIncident(Long id) {
         return incidentRepository.findById(id)
-                .orElseThrow(() -> new IncidentNotFoundException("Incident not found with id: " + id));
+                .orElseThrow(() -> new IncidentNotFoundException(incidentAccessEnabled ? "Incident not found." : "Incident not found with id: " + id));
     }
 
     private AppUser getAuthenticatedUser() {
@@ -434,11 +513,58 @@ public class IncidentServiceImpl implements IncidentService {
         }
     }
 
-    private void ensureCanViewIncident(AppUser appUser, Incident incident) {
+    private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy policyForRead(){if(accessPolicy==null)throw new IllegalStateException("Security policy unavailable.");return accessPolicy;}
+    private List<Incident> listCandidates(AppUser actor,int page,int size){
+        var paging=org.springframework.data.domain.PageRequest.of(page,size);
+        return actor.getRole()==AppUserRole.REPORTER && !(incidentAccessEnabled && policyForRead().hasGlobalView(actor))?incidentRepository.findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(actor.getEmail(),paging):incidentRepository.findAllByOrderByCreatedAtDescIdDesc(paging);
+    }
+    @Override
+    @Transactional(readOnly=true)
+    public List<IncidentResponseDto> getIncidentsPage(int page,int size){
+        if(page<0 || page>100000 || size<1 || size>500)throw new com.pareidolia.incidentmanagement.exception.InvalidRequestException("Invalid incident page.");
+        return secureRead(()->{var actor=getAuthenticatedUser();var candidates=listCandidates(actor,page,size);
+            var visible=incidentAccessEnabled?policyForRead().filterRead(actor,candidates,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW, ReadOperation.LIST):legacyVisible(actor, candidates);
+            var result=visible.stream().map(incidentMapper::toResponseDto).toList();enrichAttention(result);return result;});
+    }
+private void requireProtected(AppUser actor,Incident incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission permission) {
+        if ((!incidentAccessEnabled && !IncidentConfidentiality.isReporter(actor, incident)
+                && IncidentConfidentiality.requiresRestriction(incident, incidentRepository))
+                || (incidentAccessEnabled && (accessPolicy == null || !accessPolicy.can(actor,incident,permission))))
+            throw new IncidentNotFoundException("Incident not found.");
+    }
+    private void requireMutation(AppUser actor,Incident incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission permission) {
+        if ((!incidentAccessEnabled
+                && !(permission == com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW
+                    && IncidentConfidentiality.isReporter(actor, incident))
+                && (IncidentConfidentiality.requiresRestriction(incident, incidentRepository)
+                    || (permission == com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.ASSIGN
+                        && incident.getResponsibleDepartmentId() != null)))
+                || (incidentAccessEnabled && (accessPolicy == null || !accessPolicy.canForMutation(actor,incident,permission))))
+            throw new IncidentNotFoundException("Incident not found.");
+    }
+    private List<Incident> legacyVisible(AppUser actor, List<Incident> incidents) {
+        return incidents.stream().filter(incident -> IncidentConfidentiality.isReporter(actor, incident)
+                || !IncidentConfidentiality.requiresRestriction(incident, incidentRepository)).toList();
+    }
+
+    private void ensureCanViewIncident(AppUser appUser, Incident incident, ReadOperation operation) {
+        if (incidentAccessEnabled && policyForRead().useGlobalView(appUser, List.of(incident), operation)) return;
+        requireProtected(appUser,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW);
         if (appUser.getRole() == AppUserRole.REPORTER
                 && !appUser.getEmail().equalsIgnoreCase(incident.getReportedBy())) {
+            if (incidentAccessEnabled) throw new IncidentNotFoundException("Incident not found.");
             throw new AccessDeniedException("Access denied.");
         }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public void checkAttachmentRead(Long incidentId, boolean download) {
+        secureRead(() -> {
+            ensureCanViewIncident(getAuthenticatedUser(), findIncident(incidentId),
+                    download ? ReadOperation.ATTACHMENT_DOWNLOAD : ReadOperation.ATTACHMENT_LIST);
+            return null;
+        });
     }
 
     private String generateIncidentNumber() {

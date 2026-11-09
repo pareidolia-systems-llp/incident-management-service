@@ -25,10 +25,19 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
             nativeQuery = true)
     Optional<String> lockActiveResponsibleDepartmentName(@Param("id") Long id);
 
+    @Query(value = "select display_name from employee_departments where id = :id and active = 1",
+            nativeQuery = true)
+    Optional<String> findActiveResponsibleDepartmentName(@Param("id") Long id);
+
     @org.springframework.data.jpa.repository.Query("select i from Incident i where i.reportedAt >= :start "
             + "and (i.reportedAt < :end or (:includeEnd = true and i.reportedAt = :end)) "
             + "order by i.reportedAt, i.id")
     List<Incident> findForReport(java.time.LocalDateTime start, java.time.LocalDateTime end, boolean includeEnd);
+
+    @Query("select i from Incident i where i.reportedAt >= :start "
+            + "and (i.reportedAt < :end or (:includeEnd = true and i.reportedAt = :end)) order by i.reportedAt,i.id")
+    List<Incident> findForReport(java.time.LocalDateTime start, java.time.LocalDateTime end, boolean includeEnd,
+            org.springframework.data.domain.Pageable pageable);
 
     List<Incident> findByReportedAtGreaterThanEqualAndReportedAtLessThanOrderByReportedAtAscIdAsc(
             java.time.LocalDateTime start, java.time.LocalDateTime end);
@@ -38,4 +47,9 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
     List<Incident> findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(String reportedBy);
 
     List<Incident> findAllByOrderByCreatedAtDescIdDesc();
+
+    List<Incident> findAllByOrderByCreatedAtDescIdDesc(org.springframework.data.domain.Pageable pageable);
+
+    List<Incident> findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(String reportedBy,
+            org.springframework.data.domain.Pageable pageable);
 }

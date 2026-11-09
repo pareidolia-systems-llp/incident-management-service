@@ -103,7 +103,7 @@ class IncidentLocationTests {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.reporterDepartment").value("R&D"))
                 .andExpect(jsonPath("$.responsibleDepartmentId").value(71))
-                .andExpect(jsonPath("$.status").value("ASSIGNED"))
+                .andExpect(jsonPath("$.status").value("OPEN"))
                 .andReturn().getResponse().getContentAsString();
         long id = json.readTree(response).get("id").asLong();
         entityManager.flush();
@@ -153,6 +153,24 @@ class IncidentLocationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.issueType").value("HR_ISSUE"))
                 .andExpect(jsonPath("$.category").value("Routine HR Request"));
+    }
+
+    @Test
+    void defaultOffHrIsPendingAndLegacyAdministratorCannotReadOrAssign() throws Exception {
+        var body = request();
+        body.put("issueType", "HR_ISSUE");
+        long id = create(body);
+        assertThat(repository.findById(id).orElseThrow().getAssignedOwner()).isNull();
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(IncidentStatus.OPEN);
+        authenticateAs("admin@example.test", AppUserRole.ADMIN);
+        mvc.perform(get("/api/incidents/{id}", id)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/incidents/{id}/history", id)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/incidents")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(() ->
+                service.assignIncident(id, new com.pareidolia.incidentmanagement.dto.AssignIncidentRequestDto())))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        authenticateAs("reporter@example.test", AppUserRole.REPORTER);
+        mvc.perform(get("/api/incidents/{id}", id)).andExpect(status().isOk());
     }
 
     private void setStatus(long id, IncidentStatus status) {
@@ -582,6 +600,7 @@ class IncidentLocationTests {
         var incident = new com.pareidolia.incidentmanagement.entity.Incident();
         incident.setId(999L);
         incident.setReportedBy(reportedBy);
+        incident.setIssueType(com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE);
         incident.setStatus(IncidentStatus.VALIDATED);
         var isolatedRepository = mock(IncidentRepository.class);
         when(isolatedRepository.findById(999L)).thenReturn(java.util.Optional.of(incident));

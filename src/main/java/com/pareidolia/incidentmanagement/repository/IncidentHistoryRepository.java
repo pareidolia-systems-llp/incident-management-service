@@ -16,6 +16,8 @@ public interface IncidentHistoryRepository extends JpaRepository<IncidentHistory
             + "where i.reportedAt >= :start and i.reportedAt < :end order by i.reportedAt, i.id, h.changedAt, h.id")
     List<IncidentHistory> findForReport(java.time.LocalDateTime start, java.time.LocalDateTime end);
 
+    @org.springframework.data.jpa.repository.Query("select h from IncidentHistory h join fetch h.incident i where i.reportedAt >= :start and (i.reportedAt < :end or (:includeEnd = true and i.reportedAt = :end)) order by i.reportedAt,i.id,h.changedAt,h.id")
+    List<IncidentHistory> findForReport(java.time.LocalDateTime start,java.time.LocalDateTime end,boolean includeEnd,org.springframework.data.domain.Pageable page);
     List<IncidentHistory> findByIncidentIdOrderByChangedAtDesc(Long incidentId);
 
     List<IncidentHistory> findByIncidentIdOrderByChangedAtAscIdAsc(Long incidentId);

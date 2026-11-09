@@ -26,9 +26,12 @@ public interface IncidentService {
 
     IncidentResponseDto getIncident(Long id);
 
+    void checkAttachmentRead(Long incidentId, boolean download);
+
     IncidentResponseDto getIncidentByNumber(String incidentNumber);
 
     List<IncidentResponseDto> getAllIncidents();
+    List<IncidentResponseDto> getIncidentsPage(int page,int size);
 
     IncidentResponseDto assignIncident(Long id, AssignIncidentRequestDto request);
 

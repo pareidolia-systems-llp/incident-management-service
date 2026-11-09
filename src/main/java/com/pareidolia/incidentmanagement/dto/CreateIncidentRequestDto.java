@@ -23,6 +23,9 @@ public class CreateIncidentRequestDto {
     private String reporterDepartment;
 
     @Positive
+    private Long proposedHandlerUserId;
+
+    @Positive
     private Long responsibleDepartmentId;
 
     @JsonSetter("responsibleDepartmentId")

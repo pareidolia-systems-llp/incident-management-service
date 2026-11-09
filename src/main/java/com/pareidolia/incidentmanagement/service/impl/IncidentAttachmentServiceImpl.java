@@ -24,8 +24,24 @@ import java.util.Locale;
 @Service
 @RequiredArgsConstructor
 public class IncidentAttachmentServiceImpl implements IncidentAttachmentService {
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentSecurityGate securityGate;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentReadSnapshot readSnapshot;
+    @org.springframework.beans.factory.annotation.Value("${app.incident-access.enabled:false}") private boolean securityGateEnabled;
+    private void securityWrite(){
+        if(securityGateEnabled){if(securityGate==null)throw new IllegalStateException("Security gate unavailable.");securityGate.write();}
+    }
+    private <T> T secureRead(java.util.function.Supplier<T> work){
+        if(!securityGateEnabled)return work.get();
+        if(readSnapshot==null)throw new IllegalStateException("Security snapshot unavailable.");
+        return readSnapshot.read(work);
+    }
     private static final int MAX_BYTES = 5 * 1024 * 1024;
     private static final long MAX_PIXELS = 20_000_000;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy accessPolicy;
+    @org.springframework.beans.factory.annotation.Value("${app.incident-access.enabled:false}") private boolean incidentAccessEnabled;
     private final IncidentService incidentService;
     private final AppUserService users;
     private final IncidentRepository incidents;
@@ -35,32 +51,51 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
     @Override
     @Transactional(readOnly = true)
     public List<IncidentAttachmentResponseDto> list(Long incidentId) {
-        incidentService.getIncident(incidentId); // Reuse authoritative incident visibility, including ownership.
+        return secureRead(() -> {
+        if (incidentAccessEnabled) incidentService.checkAttachmentRead(incidentId, false);
+        else incidentService.getIncident(incidentId);
         return attachments.findMetadataByIncidentId(incidentId);
+
+        });
     }
 
     @Override
     @Transactional(readOnly = true)
     public AttachmentContentDto content(Long incidentId, Long attachmentId) {
-        incidentService.getIncident(incidentId);
+        return secureRead(() -> {
+        if (incidentAccessEnabled) incidentService.checkAttachmentRead(incidentId, true);
+        else incidentService.getIncident(incidentId);
         var attachment = attachments.findByIdAndIncidentId(attachmentId, incidentId)
                 .orElseThrow(() -> new IncidentNotFoundException("Attachment not found."));
         return new AttachmentContentDto(attachment.getOriginalFilename(), attachment.getContentType(), attachment.getFileData());
+
+        });
     }
 
     @Override
     @Transactional
     public List<IncidentAttachmentResponseDto> upload(Long incidentId, List<MultipartFile> files) {
-        incidentService.getIncident(incidentId);
+        securityWrite();
+        if (!incidentAccessEnabled) incidentService.getIncident(incidentId);
         AppUser actor = users.getAuthenticatedUser();
         if (actor.getRole() != AppUserRole.REPORTER && actor.getRole() != AppUserRole.IT_HANDLER
                 && actor.getRole() != AppUserRole.ADMIN) throw new AccessDeniedException("Access denied.");
+        Incident incident = incidentAccessEnabled
+                ? incidents.findById(incidentId).orElseThrow(() -> new IncidentNotFoundException("Incident not found."))
+                : incidents.getReferenceById(incidentId);
+        if (incidentAccessEnabled && actor.getRole() == AppUserRole.REPORTER
+                && !com.pareidolia.incidentmanagement.security.IncidentConfidentiality.isReporter(actor, incident)) {
+            throw new IncidentNotFoundException("Incident not found.");
+        }
+        if (incidentAccessEnabled && (accessPolicy == null || !accessPolicy.canForMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY)))
+            throw new IncidentNotFoundException("Incident not found.");
+        if (incidentAccessEnabled && actor.getRole() != AppUserRole.REPORTER && actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN) throw new IncidentNotFoundException("Incident not found.");
         if (files == null || files.isEmpty() || files.size() > 5) {
             throw new InvalidRequestException("Select between 1 and 5 images per upload.");
         }
         // Validate the entire batch before any write. Attachment and audit writes commit atomically.
         List<IncidentAttachment> validated = files.stream().map(this::validate).toList();
-        Incident incident = incidents.getReferenceById(incidentId);
+
         List<IncidentAttachmentResponseDto> result = new ArrayList<>();
         for (IncidentAttachment attachment : validated) {
             attachment.setIncident(incident);

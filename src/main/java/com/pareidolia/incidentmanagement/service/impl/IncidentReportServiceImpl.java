@@ -1,6 +1,7 @@
 package com.pareidolia.incidentmanagement.service.impl;
 
 import com.pareidolia.incidentmanagement.entity.Incident;
+import com.pareidolia.incidentmanagement.security.IncidentConfidentiality;
 import com.pareidolia.incidentmanagement.enums.AppUserRole;
 import com.pareidolia.incidentmanagement.exception.InvalidRequestException;
 import com.pareidolia.incidentmanagement.repository.*;
@@ -28,6 +29,19 @@ import java.util.function.Function;
 @RequiredArgsConstructor
 public class IncidentReportServiceImpl implements IncidentReportService {
     private static final Logger log = LoggerFactory.getLogger(IncidentReportServiceImpl.class);
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy accessPolicy;
+    @org.springframework.beans.factory.annotation.Value("${app.incident-access.enabled:false}") private boolean incidentAccessEnabled;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.pareidolia.incidentmanagement.security.IncidentReadSnapshot readSnapshot;
+    private <T> T secureRead(java.util.function.Supplier<T> work){
+        if(!incidentAccessEnabled)return work.get();
+        if(readSnapshot==null)throw new IllegalStateException("Security snapshot unavailable.");
+        return readSnapshot.read(work);
+    }
+    private record ReportRow(String number,Object[] values) { }
+    private record HistoryRow(String number,Long id,Object[] values) { }
+    private record Snapshot(List<ReportRow> incidents,List<HistoryRow> history) { }
     private final AppUserService users;
     private final IncidentRepository incidents;
     private final IncidentHistoryRepository history;
@@ -85,7 +99,8 @@ public class IncidentReportServiceImpl implements IncidentReportService {
     public byte[] report(Integer year, Integer month, LocalDate fromDate, LocalTime fromTime,
                          LocalDate toDate, LocalTime toTime) {
         var actor = users.getAuthenticatedUser();
-        if (actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN) {
+        if (!incidentAccessEnabled && actor.getRole() != AppUserRole.IT_HANDLER
+                && actor.getRole() != AppUserRole.ADMIN) {
             throw new AccessDeniedException("Access denied.");
         }
         LocalDateTime start, end;
@@ -115,35 +130,19 @@ public class IncidentReportServiceImpl implements IncidentReportService {
             start = period.atDay(1).atStartOfDay();
             end = period.plusMonths(1).atDay(1).atStartOfDay();
         }
-        var rows = incidents.findForReport(start, end, includeEnd);
-        Map<String, String> names = new HashMap<>();
-        if (!rows.isEmpty()) {
-            appUsers.findByEmailIn(rows.stream().map(Incident::getReportedBy).distinct().toList())
-                    .forEach(user -> names.put(user.getEmail().toLowerCase(Locale.ROOT), user.getDisplayName()));
-        }
-        // One range query per sheet; no attachment entities or BLOBs are fetched.
-        var events = history.findForReport(start, end, includeEnd);
+        final LocalDateTime snapshotStart=start,snapshotEnd=end;final boolean snapshotIncludeEnd=includeEnd;
+        Snapshot snapshot=secureRead(()->loadSnapshot(snapshotStart,snapshotEnd,snapshotIncludeEnd));
         try (var workbook = new XSSFWorkbook(); var output = new ByteArrayOutputStream()) {
             var writer = new ReportWriter(workbook);
             Sheet sheet = writer.sheet("Incidents", COLUMNS.stream().map(Column::label).toList());
-            for (Incident incident : rows) {
-                Row row = sheet.createRow(sheet.getLastRowNum() + 1);
-                for (int index = 0; index < COLUMNS.size(); index++) {
-                    Object value = index == 2 ? names.get(incident.getReportedBy().toLowerCase(Locale.ROOT))
-                            : COLUMNS.get(index).value().apply(incident);
-                    writer.cell(row, index, value, incident.getIncidentNumber(), COLUMNS.get(index).label());
-                }
+            for (ReportRow incident : snapshot.incidents()) {
+                Row row=sheet.createRow(sheet.getLastRowNum()+1);
+                for(int index=0;index<incident.values().length;index++)writer.cell(row,index,incident.values()[index],incident.number(),COLUMNS.get(index).label());
             }
-            Sheet audit = writer.sheet("Lifecycle History", List.of("Incident / Ticket Number", "Changed At",
-                    "Action", "Changed By", "Old Value", "New Value", "Remarks"));
-            for (var event : events) {
-                Row row = audit.createRow(audit.getLastRowNum() + 1);
-                Object[] values = {event.getIncident().getIncidentNumber(), event.getChangedAt(), event.getActionType(),
-                        event.getChangedBy(), event.getOldValue(), event.getNewValue(), event.getRemarks()};
-                for (int index = 0; index < values.length; index++) {
-                    writer.cell(row, index, values[index], event.getIncident().getIncidentNumber(),
-                            "History " + event.getId() + " / " + audit.getRow(0).getCell(index).getStringCellValue());
-                }
+            Sheet audit=writer.sheet("Lifecycle History",List.of("Incident / Ticket Number","Changed At","Action","Changed By","Old Value","New Value","Remarks"));
+            for(HistoryRow event:snapshot.history()){
+                Row row=audit.createRow(audit.getLastRowNum()+1);
+                for(int index=0;index<event.values().length;index++)writer.cell(row,index,event.values()[index],event.number(),"History "+event.id()+" / "+audit.getRow(0).getCell(index).getStringCellValue());
             }
             workbook.write(output);
             log.info("INCIDENT_REPORT_EXPORTED actor={} start={} end={} includeEnd={}", actor.getEmail(), start, end, includeEnd);
@@ -153,6 +152,30 @@ public class IncidentReportServiceImpl implements IncidentReportService {
         }
     }
 
+    private Snapshot loadSnapshot(LocalDateTime start,LocalDateTime end,boolean includeEnd){
+        var actor=users.getAuthenticatedUser();
+        if (actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN
+                && !(incidentAccessEnabled && policy().hasGlobalView(actor))) {
+            throw new AccessDeniedException("Access denied.");
+        }
+        var candidates=incidentAccessEnabled?incidents.findForReport(start,end,includeEnd,org.springframework.data.domain.PageRequest.of(0,10001)):incidents.findForReport(start,end,includeEnd);
+        if(incidentAccessEnabled && candidates.size()>10000)throw new InvalidRequestException("Narrow the report period to at most 10000 incidents.");
+        var rows=incidentAccessEnabled?policy().filterRead(actor, candidates, com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.REPORT,
+                com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.ReadOperation.REPORT)
+                : candidates.stream().filter(incident -> !IncidentConfidentiality.requiresRestriction(incident, incidents)).toList();
+        Map<String,String> names=new HashMap<>();
+        if(!rows.isEmpty())appUsers.findByEmailIn(rows.stream().map(Incident::getReportedBy).distinct().toList()).forEach(u->names.put(u.getEmail().toLowerCase(Locale.ROOT),u.getDisplayName()));
+        List<ReportRow> reportRows=new ArrayList<>();
+        for(var incident:rows){Object[] values=new Object[COLUMNS.size()];for(int i=0;i<values.length;i++)values[i]=i==2?names.get(incident.getReportedBy().toLowerCase(Locale.ROOT)):COLUMNS.get(i).value().apply(incident);reportRows.add(new ReportRow(incident.getIncidentNumber(),values));}
+        var events=incidentAccessEnabled?history.findForReport(start,end,includeEnd,org.springframework.data.domain.PageRequest.of(0,50001)):history.findForReport(start,end,includeEnd);
+        if(incidentAccessEnabled && events.size()>50000)throw new InvalidRequestException("Narrow the report period to at most 50000 history entries.");
+        Set<Long> allowed=rows.stream().map(Incident::getId).collect(java.util.stream.Collectors.toSet());
+        List<HistoryRow> auditRows=new ArrayList<>();
+        for(var e:events){if(!allowed.contains(e.getIncident().getId()))continue;
+            String number=e.getIncident().getIncidentNumber();auditRows.add(new HistoryRow(number,e.getId(),new Object[]{number,e.getChangedAt(),e.getActionType(),e.getChangedBy(),e.getOldValue(),e.getNewValue(),e.getRemarks()}));}
+        return new Snapshot(List.copyOf(reportRows),List.copyOf(auditRows));
+    }
+    private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy policy(){if(accessPolicy==null)throw new IllegalStateException("Security policy unavailable.");return accessPolicy;}
     private static class ReportWriter {
         private final Workbook workbook;
         private final CellStyle header, text, date;

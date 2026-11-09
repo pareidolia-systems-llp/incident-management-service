@@ -114,8 +114,8 @@ class IncidentEmailV2SmtpTests {
 
         assertThat(created.getResponsibleDepartmentId()).isEqualTo(72L);
         assertThat(created.getReporterDepartment()).isEqualTo("Operations (Annotation)");
-        assertThat(created.getAssignedOwner()).isEqualTo("owner@example.test");
-        assertThat(created.getStatus()).isEqualTo(IncidentStatus.ASSIGNED);
+        assertThat(created.getAssignedOwner()).isNull();
+        assertThat(created.getStatus()).isEqualTo(IncidentStatus.OPEN);
         assertThat(repository.findById(created.getId()).orElseThrow().getResponsibleDepartmentId()).isEqualTo(72L);
         var event = applicationEvents.stream(com.pareidolia.incidentmanagement.notification.IncidentCreated.class)
                 .findFirst().orElseThrow();

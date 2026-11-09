@@ -23,8 +23,11 @@ class IncidentManagementServiceApplicationTests {
         gate.write();
         org.assertj.core.api.Assertions.assertThat(gate.held()).isFalse();
 
-        for (String name : java.util.List.of("incidentAccessPolicy", "incidentAssignmentService",
-                "employeeDirectoryService", "incidentSecurityAdministrationService")) {
+        var policy = context.getBean(com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.class);
+        org.assertj.core.api.Assertions.assertThat(policy.isEnabled()).isFalse();
+        for (String name : java.util.List.of("incidentAssignmentService",
+                "employeeDirectoryService", "incidentSecurityAdministrationService",
+                "incidentCapabilityAdministrationService")) {
             org.assertj.core.api.Assertions.assertThat(context.containsBean(name)).as(name).isFalse();
         }
     }
