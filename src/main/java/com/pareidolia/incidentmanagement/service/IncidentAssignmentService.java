@@ -1,6 +1,7 @@
 package com.pareidolia.incidentmanagement.service;
 
 import com.pareidolia.incidentmanagement.dto.IncidentResponseDto;
+import com.pareidolia.incidentmanagement.dto.IncidentTransferRequest;
 import com.pareidolia.incidentmanagement.entity.*;
 import com.pareidolia.incidentmanagement.enums.*;
 import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
@@ -30,11 +31,28 @@ public class IncidentAssignmentService {
     private final EntityManager em;private final AppUserService users;private final IncidentRepository incidents;
     private final IncidentHistoryRepository history;private final IncidentMapper mapper;private final IncidentAccessPolicy policy;
     private final IncidentSecurityGate gate;private final IncidentReadSnapshot snapshot;private final EligibleHandlerDirectory directory;
+    public record TransferResult(long incidentId, long responsibleDepartmentId, long handlerUserId, long version,
+                                 long classificationVersion) { }
     private final Set<String> allowedPairs;
+    private final Set<String> transferScopes;
+    private final boolean transferHandoffApproved;
     public IncidentAssignmentService(EntityManager em,AppUserService users,IncidentRepository incidents,IncidentHistoryRepository history,IncidentMapper mapper,IncidentAccessPolicy policy,IncidentSecurityGate gate,IncidentReadSnapshot snapshot,EligibleHandlerDirectory directory,
-            @Value("${app.incident-assignment.allowed-actor-handler-pairs:}") String pairs){
+            @Value("${app.incident-assignment.allowed-actor-handler-pairs:}") String pairs,
+            @Value("${app.incident-transfer.allowed-coordinator-routes:}") String coordinatorRoutes,
+            @Value("${app.incident-transfer.handoff-approved:false}") boolean transferHandoffApproved){
         this.em=em;this.users=users;this.incidents=incidents;this.history=history;this.mapper=mapper;this.policy=policy;this.gate=gate;this.snapshot=snapshot;this.directory=directory;
         var parsed=new HashSet<String>();for(String pair:pairs.split(",")){pair=pair.trim();if(pair.isEmpty())continue;if(!pair.matches("[1-9][0-9]*:[1-9][0-9]*"))throw new IllegalArgumentException("Invalid assignment scope pair.");parsed.add(pair);}this.allowedPairs=Set.copyOf(parsed);
+        var routes = new HashSet<String>();
+        for (String route : coordinatorRoutes.split(",")) {
+            route = route.trim();
+            if (route.isEmpty()) continue;
+            if (!route.matches("[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*")) {
+                throw new IllegalArgumentException("Invalid incident transfer coordinator route.");
+            }
+            routes.add(route);
+        }
+        this.transferScopes = Set.copyOf(routes);
+        this.transferHandoffApproved = transferHandoffApproved;
     }
     private AppUser actor(){
         if(!policy.isEnabled())throw denied();
@@ -60,9 +78,12 @@ public class IncidentAssignmentService {
             && (!IncidentConfidentiality.requiresRestriction(incident, incidents) || classification.equals("RESTRICTED"))
             && Set.of("STANDARD","RESTRICTED").contains(classification) && incident.getStatus()!=IncidentStatus.CLOSED && capability(actor,"ASSIGNMENT_ADMIN") && canView(actor,incident) && (!classification.equals("RESTRICTED") || grant(incident.getId(),actor.getId(),"ASSIGN"));}
     private boolean handlerAllowed(AppUser actor, Incident incident, Employee handler) {
-        return directory.activeMember(incident.getResponsibleDepartmentId(), handler.id())
+        return handlerAllowed(actor, incident.getId(), incident.getResponsibleDepartmentId(), handler);
+    }
+    private boolean handlerAllowed(AppUser actor, Long incidentId, Long departmentId, Employee handler) {
+        return directory.activeMember(departmentId, handler.id())
                 && allowedPairs.contains(actor.getId()+":"+handler.id())
-                && grant(incident.getId(),handler.id(),"VIEW") && grant(incident.getId(),handler.id(),"HANDLE");
+                && grant(incidentId,handler.id(),"VIEW") && grant(incidentId,handler.id(),"HANDLE");
     }
     private State state(AppUser actor,Incident incident){
         Object[] c=classification(incident.getId());var rows=em.createNativeQuery("select handler_user_id,proposed_handler_user_id,assignment_version from incident_assignment_state where incident_id=?1").setParameter(1,incident.getId()).getResultList();
@@ -131,6 +152,144 @@ public class IncidentAssignmentService {
         if(incident.getStatus()==IncidentStatus.OPEN){var status=new IncidentHistory();status.setIncident(incident);status.setActionType(HistoryActionType.STATUS_CHANGED);status.setChangedBy(actor.getEmail());status.setOldValue("OPEN");status.setNewValue("ASSIGNED");status.setRemarks(reason.trim());history.save(status);incident.setStatus(IncidentStatus.ASSIGNED);}
         incidents.saveAndFlush(incident);return state(actor,incident);
     }
+    @Transactional
+    public TransferResult transfer(Long id, IncidentTransferRequest request) {
+        validateTransfer(request);
+        gate.write();
+        AppUser actor = actor();
+        Long source = request.expectedSourceDepartmentId();
+        Long destination = request.destinationDepartmentId();
+        Long handlerId = request.destinationHandlerUserId();
+        if (!transferHandoffApproved || !transferScopes.contains(actor.getId() + ":" + source + ":" + destination)
+                || !capability(actor, "ASSIGNMENT_ADMIN")) {
+            throw denied();
+        }
+
+        lockAccounts(actor.getId(), handlerId);
+        Incident incident = lockedIncident(id);
+        actor = actor();
+        view(actor, incident);
+        if (!grant(id, actor.getId(), "VIEW") || !grant(id, actor.getId(), "ASSIGN")) throw denied();
+        if (!source.equals(incident.getResponsibleDepartmentId())) throw conflict();
+
+        Object[] classification = classification(id);
+        String trust = (String) classification[0];
+        if (number(classification[1]) != request.expectedClassificationVersion()) throw conflict();
+        if (!assignable(actor, incident, trust)) throw denied();
+
+        Long first = Math.min(source, destination);
+        Long second = Math.max(source, destination);
+        String firstName = incidents.lockActiveResponsibleDepartmentName(first).orElseThrow(IncidentAssignmentService::denied);
+        String secondName = incidents.lockActiveResponsibleDepartmentName(second).orElseThrow(IncidentAssignmentService::denied);
+        String destinationName = destination.equals(first) ? firstName : secondName;
+        // Reject a destination that would weaken the legacy confidentiality fallback or require stricter classification.
+        if (IncidentConfidentiality.requiresRestriction(incident, destinationName) != "RESTRICTED".equals(trust)) {
+            throw denied();
+        }
+
+        Employee handler = directory.requireEligible(handlerId);
+        if (!handlerAllowed(actor, id, destination, handler)) throw denied();
+
+        var rows = em.createNativeQuery("""
+                select handler_user_id, assignment_version from incident_assignment_state
+                where incident_id = :id for update
+                """).setParameter("id", id).getResultList();
+        if (rows.size() != 1) throw conflict();
+        Object[] current = (Object[]) rows.get(0);
+        Long previousHandler = nullable(current[0]);
+        long version = number(current[1]);
+        if (version != request.expectedVersion() || (previousHandler == null && incident.getAssignedOwner() != null)) {
+            throw conflict();
+        }
+
+        requireReconciledHandoff(actor, incident, previousHandler, handlerId);
+        long next = Math.addExact(version, 1);
+        if (em.createNativeQuery("""
+                update incident_assignment_state
+                set handler_user_id = :handler, proposed_handler_user_id = null, assignment_version = :next
+                where incident_id = :id and assignment_version = :version
+                """).setParameter("handler", handlerId).setParameter("next", next).setParameter("id", id)
+                .setParameter("version", version).executeUpdate() != 1) {
+            throw conflict();
+        }
+        if (em.createNativeQuery("""
+                insert into incident_department_transfer_audit
+                    (incident_id, actor_user_id, source_department_id, destination_department_id,
+                     previous_handler_user_id, new_handler_user_id, assignment_version, classification_version,
+                     reason, handoff_approval_reference)
+                values (:id, :actor, :source, :destination, :previous, :handler, :next, :classification, :reason, :approval)
+                """).setParameter("id", id).setParameter("actor", actor.getId()).setParameter("source", source)
+                .setParameter("destination", destination).setParameter("previous", previousHandler)
+                .setParameter("handler", handlerId).setParameter("next", next)
+                .setParameter("classification", request.expectedClassificationVersion())
+                .setParameter("reason", request.reason().trim())
+                .setParameter("approval", request.handoffApprovalReference()).executeUpdate() != 1) {
+            throw new IllegalStateException("Incident transfer audit failed.");
+        }
+
+        if (!Objects.equals(incident.getAssignedOwner(), handler.email())) {
+            recordTransferHistory(incident, actor, HistoryActionType.OWNER_ASSIGNED, incident.getAssignedOwner(), handler.email());
+        }
+        incident.setResponsibleDepartmentId(destination);
+        incident.setAssignedOwner(handler.email());
+        if (incident.getStatus() == IncidentStatus.OPEN) {
+            recordTransferHistory(incident, actor, HistoryActionType.STATUS_CHANGED, "OPEN", "ASSIGNED");
+            incident.setStatus(IncidentStatus.ASSIGNED);
+        }
+        incidents.saveAndFlush(incident);
+        return new TransferResult(id, destination, handlerId, next, request.expectedClassificationVersion());
+    }
+
+    private void requireReconciledHandoff(AppUser actor, Incident incident, Long previousHandler, Long destinationHandler) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> grants = em.createNativeQuery("""
+                select g.user_id, u.email, g.permission
+                from incident_security_grants g join app_users u on u.id = g.user_id
+                where g.incident_id = :id and g.active = 1
+                """).setParameter("id", incident.getId()).getResultList();
+        String reporter = AppUserService.normalizeEmail(incident.getReportedBy());
+        for (Object[] row : grants) {
+            long userId = number(row[0]);
+            String permission = (String) row[2];
+            boolean formerHandler = Objects.equals(previousHandler, userId) && userId != destinationHandler;
+            boolean approved = (userId == actor.getId() && Set.of("VIEW", "ASSIGN").contains(permission))
+                    || (userId == destinationHandler && Set.of("VIEW", "HANDLE").contains(permission))
+                    || (!reporter.isEmpty() && reporter.equals(AppUserService.normalizeEmail((String) row[1]))
+                        && "VIEW".equals(permission));
+            if (formerHandler || !approved) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Case access requires independent handoff review.");
+            }
+        }
+    }
+
+    private void recordTransferHistory(Incident incident, AppUser actor, HistoryActionType action, String before, String after) {
+        var entry = new IncidentHistory();
+        entry.setIncident(incident);
+        entry.setActionType(action);
+        entry.setChangedBy(actor.getEmail());
+        entry.setOldValue(before);
+        entry.setNewValue(after);
+        // Keep transfer reasons and approval references in the restricted transfer audit.
+        history.save(entry);
+    }
+
+    private static void validateTransfer(IncidentTransferRequest request) {
+        if (request == null || !positive(request.expectedSourceDepartmentId()) || !positive(request.destinationDepartmentId())
+                || request.expectedSourceDepartmentId().equals(request.destinationDepartmentId())
+                || !positive(request.destinationHandlerUserId()) || request.expectedVersion() == null || request.expectedVersion() < 0
+                || request.expectedClassificationVersion() == null || request.expectedClassificationVersion() < 0
+                || request.reason() == null || request.reason().isBlank() || request.reason().length() > 500
+                || request.handoffApprovalReference() == null
+                || !request.handoffApprovalReference().matches(IncidentTransferRequest.APPROVAL_REFERENCE_PATTERN)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Distinct departments, a handler, current versions, a reason and a handoff approval reference are required.");
+        }
+    }
+
+    private static boolean positive(Long id) {
+        return id != null && id > 0;
+    }
+
     private static long number(Object o){return ((Number)o).longValue();}private static Long nullable(Object o){return o==null?null:number(o);}
     private static boolean active(Object o){return Boolean.TRUE.equals(o) || o instanceof Number n && n.intValue()==1;}
     private static AccessDeniedException denied(){return new AccessDeniedException("Access denied.");}

@@ -13,7 +13,17 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class IncidentSecurityGate {
     private static final ThreadLocal<Map<Object,Boolean>> HELD=ThreadLocal.withInitial(IdentityHashMap::new);
     private final EntityManager em; private final boolean enabled;
-    public IncidentSecurityGate(EntityManager em,@Value("${app.incident-access.enabled:false}") boolean enabled){this.em=em;this.enabled=enabled;}
+    @org.springframework.beans.factory.annotation.Autowired
+    public IncidentSecurityGate(EntityManager em,
+            @Value("${app.incident-access.enabled:false}") boolean incidentAccessEnabled,
+            @Value("${app.department-membership-admin.enabled:false}") boolean membershipAdminEnabled) {
+        this(em, incidentAccessEnabled || membershipAdminEnabled);
+    }
+
+    IncidentSecurityGate(EntityManager em, boolean enabled) {
+        this.em = em;
+        this.enabled = enabled;
+    }
     private Object transaction(){return TransactionSynchronizationManager.getResource(em.getEntityManagerFactory());}
     public boolean held(){return enabled && TransactionSynchronizationManager.isActualTransactionActive() && HELD.get().containsKey(transaction());}
     public String sharedClause(){

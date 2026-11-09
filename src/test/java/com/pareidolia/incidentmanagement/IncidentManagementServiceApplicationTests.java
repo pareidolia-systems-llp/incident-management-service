@@ -27,7 +27,7 @@ class IncidentManagementServiceApplicationTests {
         org.assertj.core.api.Assertions.assertThat(policy.isEnabled()).isFalse();
         for (String name : java.util.List.of("incidentAssignmentService",
                 "employeeDirectoryService", "incidentSecurityAdministrationService",
-                "incidentCapabilityAdministrationService")) {
+                "incidentCapabilityAdministrationService", "departmentMembershipAdminService", "departmentMembershipAdminController")) {
             org.assertj.core.api.Assertions.assertThat(context.containsBean(name)).as(name).isFalse();
         }
     }
@@ -37,6 +37,18 @@ class IncidentManagementServiceApplicationTests {
     void explicitIncidentAccessActivationIsRejected() {
         org.assertj.core.api.Assertions.assertThatIllegalStateException().isThrownBy(() ->
                 new com.pareidolia.incidentmanagement.security.IncidentAccessActivationGuard(true));
+    }
+
+    @Test
+    void membershipAdministrationRequiresTheSecurityGateEvenWhenIncidentAccessIsOff() {
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withBean(jakarta.persistence.EntityManager.class,
+                        () -> org.mockito.Mockito.mock(jakarta.persistence.EntityManager.class))
+                .withUserConfiguration(com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class)
+                .withPropertyValues("app.incident-access.enabled=false", "app.department-membership-admin.enabled=true")
+                .run(isolated -> org.assertj.core.api.Assertions.assertThatIllegalStateException()
+                        .isThrownBy(isolated.getBean(com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class)::write)
+                        .withMessageContaining("read-write transaction"));
     }
 
 	@Test

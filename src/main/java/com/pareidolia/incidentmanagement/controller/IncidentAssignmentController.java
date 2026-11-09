@@ -1,5 +1,6 @@
 package com.pareidolia.incidentmanagement.controller;
 
+import com.pareidolia.incidentmanagement.dto.IncidentTransferRequest;
 import com.pareidolia.incidentmanagement.service.*;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
@@ -18,5 +19,9 @@ public class IncidentAssignmentController {
     @GetMapping("/triage/{id}") public IncidentAssignmentService.TriageDetail triageDetail(@PathVariable Long id){return service.triageDetail(id);}
     @GetMapping("/{id}") public IncidentAssignmentService.State state(@PathVariable Long id){return service.get(id);}
     @GetMapping("/{id}/history") public java.util.List<IncidentAssignmentService.Audit> history(@PathVariable Long id){return service.history(id);}
+    @PostMapping("/{id}/transfer")
+    public IncidentAssignmentService.TransferResult transfer(@PathVariable Long id, @Valid @RequestBody IncidentTransferRequest request) {
+        return service.transfer(id, request);
+    }
     @PostMapping("/{id}") public IncidentAssignmentService.State assign(@PathVariable Long id,@Valid @RequestBody Change request){return service.assign(id,request.handlerUserId(),request.expectedVersion(),request.expectedClassificationVersion(),request.reason());}
 }
