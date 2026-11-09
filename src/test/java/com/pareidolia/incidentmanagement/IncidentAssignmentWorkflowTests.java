@@ -256,6 +256,137 @@ class IncidentAssignmentWorkflowTests {
     }
 
     @Test
+    void transferDiscoveryHttpReturnsOnlyAuthorizedDestinationsAndHandlersWithVersions() throws Exception {
+        prepareTransfer();
+        db.update("insert into employee_departments(id,display_name,active) values (74,'Inactive',0),(75,'Unapproved',1)");
+        transferRoutes(Set.of(assigner.getId() + ":71:73", assigner.getId() + ":71:74", assigner.getId() + ":71:999",
+                assigner.getId() + ":71:71", assigner.getId() + ":71:72", assigner.getId() + ":75:71"));
+        var mvc = MockMvcBuilders.standaloneSetup(
+                new com.pareidolia.incidentmanagement.controller.IncidentAssignmentController(assignments))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
+        String base = "/api/incident-assignment/" + incident.getId() + "/transfer";
+        mvc.perform(get(base + "/options")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.state.incidentId").value(incident.getId()))
+                .andExpect(jsonPath("$.state.sourceDepartmentId").value(71))
+                .andExpect(jsonPath("$.state.assignmentVersion").value(1))
+                .andExpect(jsonPath("$.state.classificationVersion").value(1))
+                .andExpect(jsonPath("$.destinations.length()").value(1))
+                .andExpect(jsonPath("$.destinations[0].departmentId").value(73))
+                .andExpect(jsonPath("$.destinations[0].displayName").value("Operations"));
+        for (String destination : List.of("71", "72", "74", "75", "999")) {
+            mvc.perform(get(base + "/handlers").param("destinationDepartmentId", destination).param("search", "alternate"))
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.handlers").doesNotExist());
+        }
+        mvc.perform(get(base + "/handlers").param("destinationDepartmentId", "73").param("search", "alternate"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.state.assignmentVersion").value(1))
+                .andExpect(jsonPath("$.destinationDepartmentId").value(73))
+                .andExpect(jsonPath("$.handlers.length()").value(1))
+                .andExpect(jsonPath("$.handlers[0].id").value(alternate.getId()));
+        mvc.perform(get(base + "/handlers").param("destinationDepartmentId", "73").param("search", "a"))
+                .andExpect(status().isBadRequest());
+        assertThat(transferAuditCount()).isZero();
+    }
+
+    @Test
+    void transferDiscoveryDeniesDisabledPolicyMissingScopeAndMissingIndependentAssign() {
+        prepareTransfer();
+        login(handler);
+        assertThatThrownBy(() -> assignments.transferOptions(incident.getId())).isInstanceOf(AccessDeniedException.class);
+        login(assigner);
+        transferRoutes(Set.of(assigner.getId() + ":73:71"));
+        assertThatThrownBy(() -> assignments.transferOptions(incident.getId())).isInstanceOf(AccessDeniedException.class);
+        transferRoutes(Set.of(assigner.getId() + ":71:71"));
+        assertThatThrownBy(() -> assignments.transferOptions(incident.getId())).isInstanceOf(AccessDeniedException.class);
+        transferRoutes(Set.of(assigner.getId() + ":71:73"));
+        org.springframework.test.util.ReflectionTestUtils.setField(assignments, "transferHandoffApproved", false);
+        try {
+            assertThatThrownBy(() -> assignments.transferOptions(incident.getId())).isInstanceOf(AccessDeniedException.class);
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(assignments, "transferHandoffApproved", true);
+        }
+        login(classifier);
+        administration.setGrant(incident.getId(), assigner.getId(), "ASSIGN", false, 1L, "Withdraw transfer permission");
+        login(assigner);
+        assertThatThrownBy(() -> assignments.transferHandlers(incident.getId(), 73L, "alternate"))
+                .isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void transferHandlerDiscoveryRechecksMembershipScopeEligibilityAndCaseGrants() {
+        prepareTransfer();
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers()).hasSize(1);
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "handler").handlers()).isEmpty();
+        login(membershipAdmin);
+        memberships.change(73L, alternate.getId(), false, 0L, "Withdraw membership");
+        login(assigner);
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers()).isEmpty();
+        login(membershipAdmin);
+        memberships.change(73L, alternate.getId(), true, 1L, "Restore membership");
+        login(assigner);
+        var pairs = org.springframework.test.util.ReflectionTestUtils.getField(assignments, "allowedPairs");
+        org.springframework.test.util.ReflectionTestUtils.setField(assignments, "allowedPairs", Set.of());
+        try {
+            assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers()).isEmpty();
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(assignments, "allowedPairs", pairs);
+        }
+        db.update("update handler_eligibility_grants set active = 0 where user_id = ?", alternate.getId());
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers()).isEmpty();
+        db.update("update handler_eligibility_grants set active = 1 where user_id = ?", alternate.getId());
+        login(classifier);
+        administration.setGrant(incident.getId(), alternate.getId(), "HANDLE", false, 1L, "Withdraw case access");
+        login(assigner);
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers()).isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = IssueType.class, names = {"HR_ISSUE",
+            "SUSPECTED_SECURITY_INCIDENT", "INFORMATION_SECURITY_INCIDENT", "MAJOR_CRITICAL_SECURITY_INCIDENT"})
+    void transferDiscoveryProtectsConfidentialCasesUntilExplicitlyGrantedAndClassified(IssueType issueType) {
+        incident = incidents.findById(createCase(issueType, 71L)).orElseThrow();
+        addTransferDestination();
+        grant(assigner.getId(), "ASSIGN");
+        grant(alternate.getId(), "VIEW");
+        grant(alternate.getId(), "HANDLE");
+        login(assigner);
+        assertThatThrownBy(() -> assignments.transferOptions(incident.getId()))
+                .isInstanceOfSatisfying(ResponseStatusException.class, e -> assertThat(e.getStatusCode().value()).isEqualTo(404));
+        assertThatThrownBy(() -> assignments.transferHandlers(incident.getId(), 73L, "alternate"))
+                .isInstanceOfSatisfying(ResponseStatusException.class, e -> assertThat(e.getStatusCode().value()).isEqualTo(404));
+
+        login(classifier);
+        grant(assigner.getId(), "VIEW");
+        login(assigner);
+        assertThatThrownBy(() -> assignments.transferOptions(incident.getId())).isInstanceOf(AccessDeniedException.class);
+        login(classifier);
+        administration.classify(incident.getId(), "RESTRICTED", 0L, "Trusted intake");
+        login(assigner);
+        assertThat(assignments.transferOptions(incident.getId()).destinations())
+                .extracting(IncidentAssignmentService.TransferDestination::departmentId).containsExactly(73L);
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").handlers())
+                .extracting(EligibleHandlerDirectory.Employee::id).containsExactly(alternate.getId());
+    }
+
+    @Test
+    void transferDiscoverySnapshotsExposeStaleSelectionsAndWriteStillRejectsThem() {
+        prepareTransfer();
+        reconcileFormerHandler();
+        transferRoutes(Set.of(assigner.getId() + ":71:73", assigner.getId() + ":73:71"));
+        var before = assignments.transferOptions(incident.getId()).state();
+        assertThat(assignments.transferHandlers(incident.getId(), 73L, "alternate").state()).isEqualTo(before);
+        assignments.transfer(incident.getId(), transferRequest(71, 73, 1, 1));
+
+        var after = assignments.transferOptions(incident.getId()).state();
+        assertThat(after.sourceDepartmentId()).isEqualTo(73);
+        assertThat(after.assignmentVersion()).isEqualTo(before.assignmentVersion() + 1);
+        assertThat(after.classificationVersion()).isEqualTo(before.classificationVersion());
+        assertThatThrownBy(() -> assignments.transferHandlers(incident.getId(), 73L, "alternate"))
+                .isInstanceOf(AccessDeniedException.class);
+        conflict(() -> assignments.transfer(incident.getId(), transferRequest(71, 73, before.assignmentVersion(),
+                before.classificationVersion())));
+    }
+
+    @Test
     void transferUpdatesDepartmentAndHandlerAndKeepsPrivateAuditOutOfIncidentHistory() throws Exception {
         prepareTransfer();
         reconcileFormerHandler();

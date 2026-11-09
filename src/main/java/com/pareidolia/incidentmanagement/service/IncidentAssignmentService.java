@@ -33,6 +33,13 @@ public class IncidentAssignmentService {
     private final IncidentSecurityGate gate;private final IncidentReadSnapshot snapshot;private final EligibleHandlerDirectory directory;
     public record TransferResult(long incidentId, long responsibleDepartmentId, long handlerUserId, long version,
                                  long classificationVersion) { }
+    public record TransferDiscoveryState(long incidentId, long sourceDepartmentId, long assignmentVersion,
+                                         long classificationVersion) { }
+    public record TransferDestination(long departmentId, String displayName) { }
+    public record TransferOptions(TransferDiscoveryState state, List<TransferDestination> destinations) { }
+    public record TransferHandlers(TransferDiscoveryState state, long destinationDepartmentId, List<Employee> handlers) { }
+    private record TransferDiscovery(AppUser actor, Incident incident, String classification, TransferDiscoveryState state) { }
+
     private final Set<String> allowedPairs;
     private final Set<String> transferScopes;
     private final boolean transferHandoffApproved;
@@ -152,6 +159,79 @@ public class IncidentAssignmentService {
         if(incident.getStatus()==IncidentStatus.OPEN){var status=new IncidentHistory();status.setIncident(incident);status.setActionType(HistoryActionType.STATUS_CHANGED);status.setChangedBy(actor.getEmail());status.setOldValue("OPEN");status.setNewValue("ASSIGNED");status.setRemarks(reason.trim());history.save(status);incident.setStatus(IncidentStatus.ASSIGNED);}
         incidents.saveAndFlush(incident);return state(actor,incident);
     }
+    public TransferOptions transferOptions(Long id) {
+        return snapshot.read(() -> {
+            TransferDiscovery discovery = transferDiscovery(id);
+            var destinations = incidents.findActiveResponsibleDepartments().stream()
+                    .filter(department -> destinationAllowed(discovery, department.getId(), department.getDisplayName()))
+                    .map(department -> new TransferDestination(department.getId(), department.getDisplayName()))
+                    .toList();
+            return new TransferOptions(discovery.state(), destinations);
+        });
+    }
+
+    public TransferHandlers transferHandlers(Long id, Long destinationDepartmentId, String search) {
+        return snapshot.read(() -> {
+            TransferDiscovery discovery = transferDiscovery(id);
+            if (!positive(destinationDepartmentId) || destinationDepartmentId.equals(discovery.state().sourceDepartmentId())
+                    || !transferRouteAllowed(discovery.actor(), discovery.state().sourceDepartmentId(), destinationDepartmentId)) {
+                throw denied();
+            }
+            String name = incidents.findActiveResponsibleDepartmentName(destinationDepartmentId)
+                    .orElseThrow(IncidentAssignmentService::denied);
+            if (!transferClassificationAllows(discovery.incident(), discovery.classification(), name)) throw denied();
+
+            var handlers = directory.search(search).stream()
+                    .filter(handler -> handlerAllowed(discovery.actor(), id, destinationDepartmentId, handler))
+                    .limit(10).toList();
+            return new TransferHandlers(discovery.state(), destinationDepartmentId, handlers);
+        });
+    }
+
+    private TransferDiscovery transferDiscovery(Long id) {
+        if (!transferHandoffApproved || !gate.held()) throw denied();
+        AppUser actor = actor();
+        if (!capability(actor, "ASSIGNMENT_ADMIN")) throw denied();
+
+        Incident incident = incident(id);
+        view(actor, incident);
+        if (!grant(id, actor.getId(), "VIEW")) throw missing();
+        if (!grant(id, actor.getId(), "ASSIGN")) throw denied();
+
+        Long source = incident.getResponsibleDepartmentId();
+        String routePrefix = actor.getId() + ":" + source + ":";
+        if (source == null || transferScopes.stream().noneMatch(route ->
+                route.startsWith(routePrefix) && !route.equals(routePrefix + source))) throw denied();
+
+        Object[] classification = classification(id);
+        String trust = (String) classification[0];
+        if (!assignable(actor, incident, trust)) throw denied();
+
+        var rows = em.createNativeQuery("""
+                select handler_user_id, assignment_version from incident_assignment_state where incident_id = :id
+                """).setParameter("id", id).getResultList();
+        if (rows.size() != 1) throw conflict();
+        Object[] current = (Object[]) rows.get(0);
+        if (current[0] == null && incident.getAssignedOwner() != null) throw conflict();
+
+        return new TransferDiscovery(actor, incident, trust,
+                new TransferDiscoveryState(id, source, number(current[1]), number(classification[1])));
+    }
+
+    private boolean destinationAllowed(TransferDiscovery discovery, Long destinationId, String destinationName) {
+        long source = discovery.state().sourceDepartmentId();
+        return source != destinationId && transferRouteAllowed(discovery.actor(), source, destinationId)
+                && transferClassificationAllows(discovery.incident(), discovery.classification(), destinationName);
+    }
+
+    private boolean transferRouteAllowed(AppUser actor, Long source, Long destination) {
+        return transferScopes.contains(actor.getId() + ":" + source + ":" + destination);
+    }
+
+    private static boolean transferClassificationAllows(Incident incident, String trust, String destinationName) {
+        return IncidentConfidentiality.requiresRestriction(incident, destinationName) == "RESTRICTED".equals(trust);
+    }
+
     @Transactional
     public TransferResult transfer(Long id, IncidentTransferRequest request) {
         validateTransfer(request);
@@ -160,7 +240,7 @@ public class IncidentAssignmentService {
         Long source = request.expectedSourceDepartmentId();
         Long destination = request.destinationDepartmentId();
         Long handlerId = request.destinationHandlerUserId();
-        if (!transferHandoffApproved || !transferScopes.contains(actor.getId() + ":" + source + ":" + destination)
+        if (!transferHandoffApproved || !transferRouteAllowed(actor, source, destination)
                 || !capability(actor, "ASSIGNMENT_ADMIN")) {
             throw denied();
         }
@@ -183,7 +263,7 @@ public class IncidentAssignmentService {
         String secondName = incidents.lockActiveResponsibleDepartmentName(second).orElseThrow(IncidentAssignmentService::denied);
         String destinationName = destination.equals(first) ? firstName : secondName;
         // Reject a destination that would weaken the legacy confidentiality fallback or require stricter classification.
-        if (IncidentConfidentiality.requiresRestriction(incident, destinationName) != "RESTRICTED".equals(trust)) {
+        if (!transferClassificationAllows(incident, trust, destinationName)) {
             throw denied();
         }
 

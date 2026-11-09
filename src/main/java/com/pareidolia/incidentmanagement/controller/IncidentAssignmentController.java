@@ -19,6 +19,15 @@ public class IncidentAssignmentController {
     @GetMapping("/triage/{id}") public IncidentAssignmentService.TriageDetail triageDetail(@PathVariable Long id){return service.triageDetail(id);}
     @GetMapping("/{id}") public IncidentAssignmentService.State state(@PathVariable Long id){return service.get(id);}
     @GetMapping("/{id}/history") public java.util.List<IncidentAssignmentService.Audit> history(@PathVariable Long id){return service.history(id);}
+    @GetMapping("/{id}/transfer/options")
+    public IncidentAssignmentService.TransferOptions transferOptions(@PathVariable Long id) {
+        return service.transferOptions(id);
+    }
+    @GetMapping("/{id}/transfer/handlers")
+    public IncidentAssignmentService.TransferHandlers transferHandlers(@PathVariable Long id,
+            @RequestParam Long destinationDepartmentId, @RequestParam String search) {
+        return service.transferHandlers(id, destinationDepartmentId, search);
+    }
     @PostMapping("/{id}/transfer")
     public IncidentAssignmentService.TransferResult transfer(@PathVariable Long id, @Valid @RequestBody IncidentTransferRequest request) {
         return service.transfer(id, request);
