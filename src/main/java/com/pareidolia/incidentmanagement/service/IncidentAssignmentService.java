@@ -43,6 +43,8 @@ public class IncidentAssignmentService {
     private final Set<String> allowedPairs;
     private final Set<String> transferScopes;
     private final boolean transferHandoffApproved;
+    @Value("${app.incident-transfer.allowed-handoff-reviewer-routes:}")
+    private String handoffReviewerRoutes;
     public IncidentAssignmentService(EntityManager em,AppUserService users,IncidentRepository incidents,IncidentHistoryRepository history,IncidentMapper mapper,IncidentAccessPolicy policy,IncidentSecurityGate gate,IncidentReadSnapshot snapshot,EligibleHandlerDirectory directory,
             @Value("${app.incident-assignment.allowed-actor-handler-pairs:}") String pairs,
             @Value("${app.incident-transfer.allowed-coordinator-routes:}") String coordinatorRoutes,
@@ -81,14 +83,17 @@ public class IncidentAssignmentService {
     private Incident lockedIncident(Long id){if(id==null || id<=0 || em.createNativeQuery("select id from incidents where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw missing();var incident=incident(id);em.refresh(incident,jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);return incident;}
     private Object[] classification(Long id){var rows=em.createNativeQuery("select classification,version from incident_security_classification where incident_id=?1").setParameter(1,id).getResultList();return rows.isEmpty()?new Object[]{"UNCLASSIFIED",0L}:(Object[])rows.get(0);}
     private boolean grant(Long incident,Long user,String permission){var rows=em.createNativeQuery("select active from incident_security_grants where incident_id=?1 and user_id=?2 and permission=?3").setParameter(1,incident).setParameter(2,user).setParameter(3,permission).getResultList();return rows.size()==1 && active(rows.get(0));}
-    private boolean assignable(AppUser actor,Incident incident,String classification){return directory.activeDepartment(incident.getResponsibleDepartmentId())
+    private boolean assignable(AppUser actor,Incident incident,String classification){return policy.allowsHrOperations(actor, incident) && directory.activeDepartment(incident.getResponsibleDepartmentId())
             && (!IncidentConfidentiality.requiresRestriction(incident, incidents) || classification.equals("RESTRICTED"))
             && Set.of("STANDARD","RESTRICTED").contains(classification) && incident.getStatus()!=IncidentStatus.CLOSED && capability(actor,"ASSIGNMENT_ADMIN") && canView(actor,incident) && (!classification.equals("RESTRICTED") || grant(incident.getId(),actor.getId(),"ASSIGN"));}
     private boolean handlerAllowed(AppUser actor, Incident incident, Employee handler) {
         return handlerAllowed(actor, incident.getId(), incident.getResponsibleDepartmentId(), handler);
     }
     private boolean handlerAllowed(AppUser actor, Long incidentId, Long departmentId, Employee handler) {
-        return directory.activeMember(departmentId, handler.id())
+        AppUser handlerAccount = em.find(AppUser.class, handler.id());
+        return policy.allowsHrOperations(handlerAccount, incident(incidentId))
+                && policy.allowsHrDestination(handlerAccount, departmentId, incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null))
+                && directory.activeMember(departmentId, handler.id())
                 && allowedPairs.contains(actor.getId()+":"+handler.id())
                 && grant(incidentId,handler.id(),"VIEW") && grant(incidentId,handler.id(),"HANDLE");
     }
@@ -117,11 +122,11 @@ public class IncidentAssignmentService {
     public List<QueueItem> triage(){return snapshot.read(()->{
         var actor=actor();boolean classifier=capability(actor,"INCIDENT_CLASSIFIER"),assigner=capability(actor,"ASSIGNMENT_ADMIN");if(!classifier && !assigner)throw denied();
         var candidates=incidents.findAllByOrderByCreatedAtDescIdDesc(org.springframework.data.domain.PageRequest.of(0,100));var result=new ArrayList<QueueItem>();
-        for(var incident:candidates){String c=(String)classification(incident.getId())[0];if(c.equals("UNCLASSIFIED") && classifier || c.equals("STANDARD") && assigner && canView(actor,incident))result.add(new QueueItem(incident.getId(),incident.getIncidentNumber(),c));}return List.copyOf(result);
+        for(var incident:candidates){if (!policy.allowsHrScope(actor, incident)) continue; String c=(String)classification(incident.getId())[0];if(c.equals("UNCLASSIFIED") && classifier || c.equals("STANDARD") && assigner && canView(actor,incident))result.add(new QueueItem(incident.getId(),incident.getIncidentNumber(),c));}return List.copyOf(result);
     });}
     @Transactional(readOnly=true)
     public TriageDetail triageDetail(Long id){return snapshot.read(()->{
-        var actor=actor();var incident=incident(id);String c=(String)classification(id)[0];
+        var actor=actor();var incident=incident(id);if (!policy.allowsHrScope(actor, incident)) throw missing();String c=(String)classification(id)[0];
         if(c.equals("UNCLASSIFIED")){if(!capability(actor,"INCIDENT_CLASSIFIER"))throw missing();}
         else {if(!capability(actor,"ASSIGNMENT_ADMIN") && !capability(actor,"INCIDENT_CLASSIFIER"))throw missing();view(actor,incident);}
         return new TriageDetail(mapper.toResponseDto(incident),state(actor,incident));
@@ -179,7 +184,7 @@ public class IncidentAssignmentService {
             }
             String name = incidents.findActiveResponsibleDepartmentName(destinationDepartmentId)
                     .orElseThrow(IncidentAssignmentService::denied);
-            if (!transferClassificationAllows(discovery.incident(), discovery.classification(), name)) throw denied();
+            if (!destinationAllowed(discovery, destinationDepartmentId, name)) throw denied();
 
             var handlers = directory.search(search).stream()
                     .filter(handler -> handlerAllowed(discovery.actor(), id, destinationDepartmentId, handler))
@@ -221,14 +226,19 @@ public class IncidentAssignmentService {
     private boolean destinationAllowed(TransferDiscovery discovery, Long destinationId, String destinationName) {
         long source = discovery.state().sourceDepartmentId();
         return source != destinationId && transferRouteAllowed(discovery.actor(), source, destinationId)
-                && transferClassificationAllows(discovery.incident(), discovery.classification(), destinationName);
+                && policy.allowsHrDestination(discovery.actor(), destinationId, destinationName)
+                && transferClassificationAllows(discovery.incident(), discovery.classification(), destinationId, destinationName);
     }
 
     private boolean transferRouteAllowed(AppUser actor, Long source, Long destination) {
         return transferScopes.contains(actor.getId() + ":" + source + ":" + destination);
     }
 
-    private static boolean transferClassificationAllows(Incident incident, String trust, String destinationName) {
+    private boolean transferClassificationAllows(Incident incident, String trust, Long destination, String destinationName) {
+        String sourceName = incidents.findActiveResponsibleDepartmentName(incident.getResponsibleDepartmentId()).orElse(null);
+        if (sourceName == null || (policy.isHrCase(incident, sourceName)
+                && !policy.isHrCaseAtDepartment(incident, destination, destinationName))) return false;
+        if (policy.isHrCaseAtDepartment(incident, destination, destinationName) && !"RESTRICTED".equals(trust)) return false;
         return IncidentConfidentiality.requiresRestriction(incident, destinationName) == "RESTRICTED".equals(trust);
     }
 
@@ -263,7 +273,7 @@ public class IncidentAssignmentService {
         String secondName = incidents.lockActiveResponsibleDepartmentName(second).orElseThrow(IncidentAssignmentService::denied);
         String destinationName = destination.equals(first) ? firstName : secondName;
         // Reject a destination that would weaken the legacy confidentiality fallback or require stricter classification.
-        if (!transferClassificationAllows(incident, trust, destinationName)) {
+        if (!policy.allowsHrDestination(actor, destination, destinationName) || !transferClassificationAllows(incident, trust, destination, destinationName)) {
             throw denied();
         }
 
@@ -282,7 +292,8 @@ public class IncidentAssignmentService {
             throw conflict();
         }
 
-        requireReconciledHandoff(actor, incident, previousHandler, handlerId);
+        requireReconciledHandoff(actor, incident, previousHandler, handlerId, null);
+        requireRecordedHandoffApproval(id, actor.getId(), request);
         long next = Math.addExact(version, 1);
         if (em.createNativeQuery("""
                 update incident_assignment_state
@@ -320,7 +331,208 @@ public class IncidentAssignmentService {
         return new TransferResult(id, destination, handlerId, next, request.expectedClassificationVersion());
     }
 
-    private void requireReconciledHandoff(AppUser actor, Incident incident, Long previousHandler, Long destinationHandler) {
+    public record HandoffRequest(Long expectedSourceDepartmentId, Long destinationDepartmentId, Long destinationHandlerUserId,
+                                 Long expectedVersion, Long expectedClassificationVersion, String reason) { }
+    public record HandoffDecision(String action, Long expectedVersion, String reason) { }
+    public record Handoff(String reference, long coordinatorId, long sourceDepartmentId, long destinationDepartmentId,
+                          long handlerId, long assignmentVersion, long classificationVersion, String status, long version,
+                          String requestReason, boolean canReview, boolean canRevoke, boolean canUse) { }
+    public record HandoffAudit(long version, long actorId, String status, String reason, String changedAt) { }
+
+    @Transactional
+    public String requestHandoff(Long id, HandoffRequest request) {
+        String reference = UUID.randomUUID().toString();
+        var transfer = new IncidentTransferRequest(request.expectedSourceDepartmentId(), request.destinationDepartmentId(),
+                request.destinationHandlerUserId(), request.expectedVersion(), request.expectedClassificationVersion(),
+                request.reason(), reference);
+        validateTransfer(transfer);
+        gate.write();
+        var discovery = transferDiscovery(id);
+        var state = discovery.state();
+        if (state.sourceDepartmentId() != transfer.expectedSourceDepartmentId()
+                || state.assignmentVersion() != transfer.expectedVersion()
+                || state.classificationVersion() != transfer.expectedClassificationVersion()) throw conflict();
+        String destinationName = incidents.findActiveResponsibleDepartmentName(transfer.destinationDepartmentId())
+                .orElseThrow(IncidentAssignmentService::denied);
+        if (!destinationAllowed(discovery, transfer.destinationDepartmentId(), destinationName)
+                || !handlerAllowed(discovery.actor(), id, transfer.destinationDepartmentId(),
+                        directory.requireEligible(transfer.destinationHandlerUserId()))) throw denied();
+        if (em.createNativeQuery("""
+                insert into incident_transfer_handoff_approvals
+                    (approval_reference, incident_id, coordinator_user_id, source_department_id, destination_department_id,
+                     destination_handler_user_id, assignment_version, classification_version, decision_status, request_reason)
+                values (:ref, :incident, :actor, :source, :destination, :handler, :version, :classification, 'PENDING', :reason)
+                """).setParameter("ref", reference).setParameter("incident", id).setParameter("actor", discovery.actor().getId())
+                .setParameter("source", state.sourceDepartmentId()).setParameter("destination", transfer.destinationDepartmentId())
+                .setParameter("handler", transfer.destinationHandlerUserId()).setParameter("version", state.assignmentVersion())
+                .setParameter("classification", state.classificationVersion()).setParameter("reason", transfer.reason().trim())
+                .executeUpdate() != 1) throw conflict();
+        auditHandoff(reference, 0, discovery.actor().getId(), "PENDING", transfer.reason().trim());
+        return reference;
+    }
+
+    public List<Handoff> handoffs(Long id) {
+        return snapshot.read(() -> {
+            AppUser actor = handoffActor(id);
+            var rows = em.createNativeQuery("""
+                    select approval_reference, coordinator_user_id, source_department_id, destination_department_id,
+                           destination_handler_user_id, assignment_version, classification_version,
+                           case when decision_status='APPROVED' and expires_at <= current_timestamp then 'EXPIRED' else decision_status end,
+                           decision_version, request_reason
+                    from incident_transfer_handoff_approvals where incident_id=:incident
+                    order by requested_at desc, approval_reference
+                    """).setParameter("incident", id).setMaxResults(101).getResultList();
+            if (rows.size() > 100) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Handoff history limit exceeded.");
+            return rows.stream().map(row -> handoff(actor, (Object[]) row)).filter(Objects::nonNull).toList();
+        });
+    }
+
+    public List<HandoffAudit> handoffHistory(Long id, String reference) {
+        return snapshot.read(() -> {
+            requireHandoff(handoffActor(id), id, reference);
+            @SuppressWarnings("unchecked")
+            List<Object[]> rows = em.createNativeQuery("""
+                    select decision_version, actor_user_id, decision_status, reason, changed_at
+                    from incident_transfer_handoff_audit where approval_reference=:ref order by decision_version
+                    """).setParameter("ref", reference).getResultList();
+            return rows.stream().map(row -> new HandoffAudit(number(row[0]), number(row[1]), (String) row[2],
+                    (String) row[3], String.valueOf(row[4]))).toList();
+        });
+    }
+
+    @Transactional
+    public void decideHandoff(Long id, String reference, HandoffDecision decision) {
+        if (decision.action() == null || !Set.of("APPROVED", "REJECTED", "REVOKED").contains(decision.action())
+                || decision.expectedVersion() == null || decision.expectedVersion() < 0
+                || decision.reason() == null || decision.reason().isBlank() || decision.reason().length() > 500) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A decision, version and reason are required.");
+        }
+        gate.write();
+        AppUser reviewer = handoffActor(id);
+        Handoff handoff = requireHandoff(reviewer, id, reference);
+        boolean revoke = "REVOKED".equals(decision.action());
+        boolean approve = "APPROVED".equals(decision.action());
+        if (!(revoke ? handoff.canRevoke() : handoff.canReview())) throw denied();
+        if (handoff.version() != decision.expectedVersion()) throw conflict();
+        if (approve) {
+            Incident current = incident(id);
+            State state = state(reviewer, current);
+            if (!Objects.equals(current.getResponsibleDepartmentId(), handoff.sourceDepartmentId())
+                    || current.getStatus() == IncidentStatus.CLOSED || state.version() != handoff.assignmentVersion()
+                    || state.classificationVersion() != handoff.classificationVersion()
+                    || !transferScopes.contains(handoff.coordinatorId() + ":" + handoff.sourceDepartmentId() + ":" + handoff.destinationDepartmentId())) throw conflict();
+            AppUser coordinator = em.find(AppUser.class, handoff.coordinatorId());
+            var handler = directory.requireEligible(handoff.handlerId());
+            String destinationName = incidents.findActiveResponsibleDepartmentName(handoff.destinationDepartmentId())
+                    .orElseThrow(IncidentAssignmentService::denied);
+            if (coordinator == null || !Boolean.TRUE.equals(coordinator.getActive()) || !capability(coordinator, "ASSIGNMENT_ADMIN")
+                    || !policy.allowsHrOperations(coordinator, current)
+                    || !policy.allowsHrDestination(reviewer, handoff.destinationDepartmentId(), destinationName)
+                    || !policy.allowsHrDestination(coordinator, handoff.destinationDepartmentId(), destinationName)
+                    || !grant(id, handoff.coordinatorId(), "VIEW") || !grant(id, handoff.coordinatorId(), "ASSIGN")
+                    || !directory.activeDepartment(handoff.sourceDepartmentId())
+                    || !transferClassificationAllows(current, state.classification(), handoff.destinationDepartmentId(), destinationName)
+                    || !handlerAllowed(coordinator, id, handoff.destinationDepartmentId(), handler)) throw denied();
+            var previous = em.createNativeQuery("select handler_user_id from incident_assignment_state where incident_id=:id")
+                    .setParameter("id", id).getResultList();
+            if (previous.size() != 1) throw conflict();
+            requireReconciledHandoff(coordinator, current, nullable(previous.get(0)), handoff.handlerId(), reviewer.getId());
+        }
+        long next = Math.addExact(handoff.version(), 1);
+        if (em.createNativeQuery("""
+                update incident_transfer_handoff_approvals set decision_status=:action, decision_version=:next,
+                    approved_by_user_id=case when :approve=1 then :actor else approved_by_user_id end,
+                    approved_at=case when :approve=1 then current_timestamp else approved_at end,
+                    expires_at=case when :approve=1 then timestampadd(hour, 24, current_timestamp) else expires_at end,
+                    revoked_at=case when :revoke=1 then current_timestamp else revoked_at end
+                where incident_id=:incident and approval_reference=:ref and decision_version=:version
+                """).setParameter("action", decision.action()).setParameter("next", next).setParameter("actor", reviewer.getId())
+                .setParameter("approve", approve ? 1 : 0).setParameter("revoke", revoke ? 1 : 0)
+                .setParameter("incident", id).setParameter("ref", reference).setParameter("version", handoff.version())
+                .executeUpdate() != 1) throw conflict();
+        auditHandoff(reference, next, reviewer.getId(), decision.action(), decision.reason().trim());
+    }
+
+    private AppUser handoffActor(Long id) {
+        if (!transferHandoffApproved || !gate.held()) throw denied();
+        AppUser actor = actor();
+        Incident item = incident(id);
+        if (!policy.allowsHrOperations(actor, item)) throw missing();
+        view(actor, item);
+        if (!grant(id, actor.getId(), "VIEW")) throw missing();
+        return actor;
+    }
+
+    private Handoff requireHandoff(AppUser actor, Long id, String reference) {
+        var rows = em.createNativeQuery("""
+                select approval_reference, coordinator_user_id, source_department_id, destination_department_id,
+                       destination_handler_user_id, assignment_version, classification_version,
+                       case when decision_status='APPROVED' and expires_at <= current_timestamp then 'EXPIRED' else decision_status end,
+                           decision_version, request_reason
+                from incident_transfer_handoff_approvals where incident_id=:incident and approval_reference=:ref
+                """ + gate.sharedClause()).setParameter("incident", id).setParameter("ref", reference).getResultList();
+        if (rows.size() != 1) throw missing();
+        Handoff result = handoff(actor, (Object[]) rows.get(0));
+        if (result == null || !result.reference().equals(reference)) throw missing();
+        return result;
+    }
+
+    private Handoff handoff(AppUser actor, Object[] row) {
+        long coordinator = number(row[1]), source = number(row[2]), destination = number(row[3]), handler = number(row[4]);
+        String status = (String) row[7];
+        boolean reviewer = actor.getId() != coordinator && actor.getId() != handler
+                && handoffReviewerAllowed(actor.getId(), source, destination);
+        if (actor.getId() != coordinator && !reviewer) return null;
+        return new Handoff((String) row[0], coordinator, source, destination, handler, number(row[5]),
+                number(row[6]), status, number(row[8]), (String) row[9],
+                reviewer && "PENDING".equals(status), reviewer && "APPROVED".equals(status),
+                actor.getId() == coordinator && "APPROVED".equals(status));
+    }
+
+    private boolean handoffReviewerAllowed(long reviewer, long source, long destination) {
+        String scope = reviewer + ":" + source + ":" + destination;
+        return Arrays.stream(handoffReviewerRoutes.split(",")).map(String::trim).anyMatch(scope::equals);
+    }
+
+    private void auditHandoff(String reference, long version, long actor, String status, String reason) {
+        if (em.createNativeQuery("""
+                insert into incident_transfer_handoff_audit (approval_reference, decision_version, actor_user_id, decision_status, reason)
+                values (:ref, :version, :actor, :status, :reason)
+                """).setParameter("ref", reference).setParameter("version", version).setParameter("actor", actor)
+                .setParameter("status", status).setParameter("reason", reason).executeUpdate() != 1) {
+            throw new IllegalStateException("Handoff audit failed.");
+        }
+    }
+
+    private void requireRecordedHandoffApproval(Long incidentId, Long actorId, IncidentTransferRequest request) {
+        var approvals = em.createNativeQuery("""
+                select a.approval_reference, a.approved_by_user_id
+                from incident_transfer_handoff_approvals a
+                join app_users approver on approver.id = a.approved_by_user_id
+                join incident_transfer_handoff_audit audit on audit.approval_reference = a.approval_reference
+                    and audit.decision_version = a.decision_version and audit.actor_user_id = a.approved_by_user_id
+                    and audit.decision_status = 'APPROVED'
+                where a.approval_reference = :reference and a.incident_id = :incident
+                  and a.coordinator_user_id = :actor and a.source_department_id = :source
+                  and a.destination_department_id = :destination and a.destination_handler_user_id = :handler
+                  and a.assignment_version = :assignment and a.classification_version = :classification
+                  and a.decision_status = 'APPROVED' and a.revoked_at is null and a.expires_at > current_timestamp
+                  and approver.active = 1
+                """ + gate.sharedClause())
+                .setParameter("reference", request.handoffApprovalReference()).setParameter("incident", incidentId)
+                .setParameter("actor", actorId).setParameter("source", request.expectedSourceDepartmentId())
+                .setParameter("destination", request.destinationDepartmentId())
+                .setParameter("handler", request.destinationHandlerUserId())
+                .setParameter("assignment", request.expectedVersion())
+                .setParameter("classification", request.expectedClassificationVersion()).getResultList();
+        Object[] approval = approvals.size() == 1 ? (Object[]) approvals.get(0) : null;
+        if (approval == null || !request.handoffApprovalReference().equals(approval[0])
+                || !handoffReviewerAllowed(number(approval[1]), request.expectedSourceDepartmentId(), request.destinationDepartmentId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Case access requires independent handoff review.");
+        }
+    }
+
+    private void requireReconciledHandoff(AppUser actor, Incident incident, Long previousHandler, Long destinationHandler, Long reviewingUser) {
         @SuppressWarnings("unchecked")
         List<Object[]> grants = em.createNativeQuery("""
                 select g.user_id, u.email, g.permission
@@ -332,7 +544,8 @@ public class IncidentAssignmentService {
             long userId = number(row[0]);
             String permission = (String) row[2];
             boolean formerHandler = Objects.equals(previousHandler, userId) && userId != destinationHandler;
-            boolean approved = (userId == actor.getId() && Set.of("VIEW", "ASSIGN").contains(permission))
+            boolean approved = (Objects.equals(reviewingUser, userId) && "VIEW".equals(permission))
+                    || (userId == actor.getId() && Set.of("VIEW", "ASSIGN").contains(permission))
                     || (userId == destinationHandler && Set.of("VIEW", "HANDLE").contains(permission))
                     || (!reporter.isEmpty() && reporter.equals(AppUserService.normalizeEmail((String) row[1]))
                         && "VIEW".equals(permission));

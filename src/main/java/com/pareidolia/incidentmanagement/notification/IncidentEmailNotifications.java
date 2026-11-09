@@ -19,43 +19,78 @@ public final class IncidentEmailNotifications {
     public record Settings(boolean enabled,String from,String itRecipients,String hrRecipients,String devAllowlist) { }
     private static final org.slf4j.Logger LOG=org.slf4j.LoggerFactory.getLogger(IncidentEmailNotifications.class);
     private static final String APPROVED_PRODUCTION_SENDER="alerts@pareidolia.in";
-    private static final String HR_CASE_MAILBOX = "schakravorty@pareidolia.in";
     private final Settings settings;
     private final Environment environment;
     private final ObjectProvider<JavaMailSender> senders;
     private final Executor executor;
     private final IncidentEmailDetailPolicy detailPolicy;
+    private final VerifiedIncidentMailRouting verifiedRouting;
     IncidentEmailNotifications(Settings settings, Environment environment, ObjectProvider<JavaMailSender> senders,
             Executor executor, IncidentEmailDetailPolicy detailPolicy) {
+        this(settings, environment, senders, executor, detailPolicy, null);
+    }
+
+    IncidentEmailNotifications(Settings settings, Environment environment, ObjectProvider<JavaMailSender> senders,
+            Executor executor, IncidentEmailDetailPolicy detailPolicy, VerifiedIncidentMailRouting verifiedRouting) {
         this.settings=settings;this.environment=environment;this.senders=senders;this.executor=executor;
         this.detailPolicy = detailPolicy;
+        this.verifiedRouting = verifiedRouting;
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT,fallbackExecution=false)
     public void created(IncidentCreated event) {
-        if(!settings.enabled()) return;
+        if(!settings.enabled() || environment.getProperty("app.incident-access.enabled", Boolean.class, false)) return;
         try {executor.execute(() -> deliver(event));}
         catch(RuntimeException failure) {LOG.warn("Incident email task was not queued.");}
     }
+    @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT, fallbackExecution=false)
+    public void classificationReady(IncidentMailReady event) {
+        if (!settings.enabled() || !environment.getProperty("app.incident-access.enabled", Boolean.class, false)
+                || !environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)) return;
+        try {
+            executor.execute(() -> {
+                try {
+                    boolean dev = environment.acceptsProfiles(Profiles.of("dev & !prod & !production & !default"));
+                    boolean production = environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
+                            && environment.getProperty("app.notifications.email.local-postfix-enabled", Boolean.class, false);
+                    if (dev != production && environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())) {
+                        deliverVerified(event.incidentNumber(), dev, production);
+                    }
+                } catch (RuntimeException failure) {
+                    LOG.warn("Incident mail authorization unavailable. Notification withheld.");
+                }
+            });
+        } catch (RuntimeException failure) {
+            LOG.warn("Incident email task was not queued.");
+        }
+    }
+
     private void deliver(IncidentCreated event) {
         try {
             boolean dev=environment.acceptsProfiles(Profiles.of("dev & !prod & !production & !default"));
             boolean production=environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
                     && environment.getProperty("app.notifications.email.local-postfix-enabled",Boolean.class,false);
-            if(!settings.enabled() || dev==production) return;
+            if(!settings.enabled() || !environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled()) || dev==production) return;
             if(event.incidentNumber()==null || !event.incidentNumber().matches("INC-[0-9]{4}-[0-9]{8}-[0-9]{6}-[A-F0-9]{8}")) return;
+            if (environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)) {
+                deliverVerified(event.incidentNumber(), dev, production);
+                return;
+            }
+            if (environment.getProperty("app.incident-access.enabled", Boolean.class, false)) return;
             boolean v2=environment.getProperty("app.notifications.email.v2.enabled",Boolean.class,false);
             var hint = RoutineIncidentEmailRoute.from(event);
             if (hint == UNKNOWN || hint == SECURITY) return;
             var assessment = detailPolicy.assess(event.incidentNumber());
             var decision = assessment.decision();
-            boolean routine = v2 && !assessment.authorityConfigured() && "true".equalsIgnoreCase(
+            boolean routine = v2 && !assessment.authorityConfigured()
+                    && !environment.getProperty("app.incident-access.enabled", Boolean.class, false)
+                    && "true".equalsIgnoreCase(
                     environment.getProperty("app.notifications.email.v2.routine-routing-enabled"));
             if (!routine && (decision == null || (hint == HR && decision.route() != HR))) return;
             var route = routine ? hint : decision.route();
             boolean hrCase = route == HR;
             if (!hrCase && (route != ORDINARY_IT || (!routine && decision.classification() != STANDARD))) return;
 
-            var recipients = hrCase ? Set.of(HR_CASE_MAILBOX)
+            var recipients = hrCase ? addresses(environment.getProperty("app.notifications.email.hr-case-recipients", ""))
                     : addresses(settings.itRecipients()+","+settings.hrRecipients());
             if (v2 && !hrCase) {
                 addDepartmentRecipients(recipients,event.reporterDepartment(),
@@ -100,6 +135,34 @@ public final class IncidentEmailNotifications {
             }
         } catch(RuntimeException failure) {LOG.warn("Incident email delivery configuration is invalid.");}
     }
+    private void deliverVerified(String incidentNumber, boolean dev, boolean production) {
+        if (verifiedRouting == null) return;
+        var candidates = verifiedRouting.recipients(incidentNumber);
+        if (candidates.isEmpty()) return;
+        var allowlist = dev ? addresses(settings.devAllowlist()) : Set.<String>of();
+        String from = address(settings.from());
+        JavaMailSender sender = senders.getIfUnique();
+        if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
+        String origin = environment.getProperty("app.notifications.email.portal-origin", "");
+        var content = IncidentEmailTemplate.renderMinimal(origin);
+        for (String recipient : candidates) {
+            if (dev && !allowlist.contains(recipient)) continue;
+            if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
+                    || !verifiedRouting.recipients(incidentNumber).contains(recipient)) continue;
+            try {
+                var message = sender.createMimeMessage();
+                var helper = new org.springframework.mail.javamail.MimeMessageHelper(message, true, "UTF-8");
+                helper.setFrom(from);
+                helper.setTo(recipient);
+                helper.setSubject(content.subject());
+                helper.setText(content.plainText(), content.html());
+                sender.send(message);
+            } catch (Exception failure) {
+                LOG.warn("Incident email delivery failed.");
+            }
+        }
+    }
+
     private static boolean approvedPostfix(JavaMailSender sender) {
         if(!(sender instanceof JavaMailSenderImpl mail)) return false;
         var p=mail.getJavaMailProperties();
@@ -113,7 +176,7 @@ public final class IncidentEmailNotifications {
                 && !p.containsKey("mail.smtp.proxy.host") && !p.containsKey("mail.smtp.socks.host")
                 && !p.containsKey("mail.smtp.socketFactory.class");
     }
-    private static Set<String> addresses(String value) {
+    static Set<String> addresses(String value) {
         var result=new LinkedHashSet<String>();
         if(value==null || value.isBlank()) return result;
         for(String part:value.split(",")) if(!part.isBlank()) result.add(address(part));

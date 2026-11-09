@@ -27,6 +27,23 @@ class IncidentEmailV2Tests {
             assertThat(result.html()).contains("Pareidolia Systems LLP","INC-2026-20261104-120000-ABCDEF12").doesNotContain("Printer", "Reporter", "Ops", issue.name());
         }
     }
+    @Test void guardedIntakeDoesNotSendWithoutAnAuthoritativeDecision() {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<JavaMailSender> provider = mock(ObjectProvider.class);
+        var environment = new MockEnvironment();
+        environment.setActiveProfiles("dev");
+        environment.setProperty("app.incident-access.enabled", "true");
+        environment.setProperty("app.notifications.email.v2.enabled", "true");
+        environment.setProperty("app.notifications.email.v2.routine-routing-enabled", "true");
+        var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test", "it@example.test",
+                "hr@example.test", "it@example.test,hr@example.test");
+        var policy = new IncidentEmailDetailPolicy(environment, java.util.stream.Stream::empty);
+        var notifier = new IncidentEmailNotifications(settings, environment, provider, Runnable::run, policy);
+        notifier.created(event(IssueType.IT_ISSUE));
+        notifier.created(event(IssueType.HR_ISSUE));
+        verifyNoInteractions(provider);
+    }
+
     @Test void approvedRendererEscapesHtmlAndStripsUnsafeSubjectCharacters() {
         var result=IncidentEmailTemplate.render(event(IssueType.IT_ISSUE),true);
         assertThat(result.subject()).isEqualTo("New incident created");

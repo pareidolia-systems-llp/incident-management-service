@@ -44,7 +44,8 @@ class IncidentAccessPolicyTests {
         db.update("insert into assignment_admin_capabilities values(?,'GLOBAL_INCIDENT_VIEW',1)",user.getId());
         var classified = new Incident();
         classified.setId(124L);
-        db.update("insert into incident_security_classification values(124,'RESTRICTED')");
+        classified.setIssueType(com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE);
+        db.update("insert into incident_security_classification values(124,'STANDARD')");
         enabled.can(user,incident,IncidentAccessPolicy.Permission.VIEW);
         assertThat(enabled.useGlobalView(user,java.util.List.of(incident),IncidentAccessPolicy.ReadOperation.DETAIL)).isFalse();
         assertThat(enabled.filterRead(user,java.util.List.of(incident,classified),

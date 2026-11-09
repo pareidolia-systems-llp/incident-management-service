@@ -22,6 +22,8 @@ public interface IncidentService {
 
     IncidentResponseDto addWorkNote(Long id, com.pareidolia.incidentmanagement.dto.AddWorkNoteRequestDto request);
 
+    boolean departmentScopedIntakeAvailable();
+
     IncidentResponseDto createIncident(CreateIncidentRequestDto request);
 
     IncidentResponseDto getIncident(Long id);

@@ -27,7 +27,7 @@ class IncidentEmailDetailTests {
     private static final String NUMBER = "INC-2026-20261107-120000-ABCDEF12";
     private static final String IT = "it@example.test";
     private static final String HR = "hr@example.test";
-    private static final String HR_CASE = "schakravorty@pareidolia.in";
+    private static final String HR_CASE = "hr-mailbox@example.test";
     private static final String OPS = "ops@example.test";
 
     @Test
@@ -407,7 +407,7 @@ class IncidentEmailDetailTests {
     }
 
     private static final class Fixture {
-        final MockEnvironment env = new MockEnvironment()
+        final MockEnvironment env = new MockEnvironment().withProperty("app.notifications.email.hr-case-recipients", HR_CASE)
                 .withProperty("app.notifications.email.v2.enabled", "true")
                 .withProperty("app.notifications.email.v2.details-enabled", "true")
                 .withProperty("app.notifications.email.portal-origin", "https://portal.example.test")
@@ -456,7 +456,8 @@ class IncidentEmailDetailTests {
                     itRecipients, HR, String.join(",", IT, HR, OPS, HR_CASE));
             new IncidentEmailConfiguration().incidentEmailNotifications(settings, env,
                     beans.getBeanProvider(JavaMailSender.class),
-                    beans.getBeanProvider(IncidentEmailDetailAuthority.class), Runnable::run)
+                    beans.getBeanProvider(IncidentEmailDetailAuthority.class),
+                    beans.getBeanProvider(VerifiedIncidentMailRouting.class), Runnable::run)
                     .created(event);
         }
 

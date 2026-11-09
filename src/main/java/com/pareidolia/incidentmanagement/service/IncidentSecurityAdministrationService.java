@@ -1,6 +1,8 @@
 package com.pareidolia.incidentmanagement.service;
 
 import com.pareidolia.incidentmanagement.entity.AppUser;
+import com.pareidolia.incidentmanagement.entity.Incident;
+import com.pareidolia.incidentmanagement.security.IncidentAccessPolicy;
 import jakarta.persistence.EntityManager;
 import java.util.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -38,8 +40,17 @@ public class IncidentSecurityAdministrationService {
     public record ClassificationHistory(long actorId,String previous,String next,long version,String reason,String changedAt) { }
     private static final Set<String> CLASSIFICATIONS=Set.of("STANDARD","RESTRICTED");
     private static final Set<String> PERMISSIONS=Set.of("VIEW","HANDLE","MODIFY","REPORT","ASSIGN");
+    private static final org.slf4j.Logger SECURITY_AUDIT = org.slf4j.LoggerFactory.getLogger("incident.security.audit");
     private final AppUserService users;private final EntityManager em;
-    public IncidentSecurityAdministrationService(AppUserService users,EntityManager em){this.users=users;this.em=em;}
+    private final IncidentAccessPolicy access;
+    private final org.springframework.context.ApplicationEventPublisher events;
+    private boolean withinScope(AppUser actor, Long incident) {
+        return incident != null && incident > 0 && access.allowsHrOperations(actor, em.find(Incident.class, incident));
+    }
+    private void requireScope(AppUser actor, Long incident) {
+        if (!withinScope(actor, incident)) throw missing();
+    }
+    public IncidentSecurityAdministrationService(AppUserService users,EntityManager em,IncidentAccessPolicy access,org.springframework.context.ApplicationEventPublisher events){this.users=users;this.em=em;this.access=access;this.events=events;}
     private AppUser identity(){
         var auth=SecurityContextHolder.getContext().getAuthentication();
         if(auth==null || !auth.isAuthenticated() || !(auth.getPrincipal() instanceof OidcUser oidc)
@@ -50,8 +61,8 @@ public class IncidentSecurityAdministrationService {
         return actor;
     }
     private void lockAccounts(Long... ids){for(Long id:new TreeSet<>(Arrays.asList(ids)))
-        if(em.createNativeQuery("select id from app_users where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw denied();}
-    private void lockIncident(Long id){if(id==null || id<=0 || em.createNativeQuery("select id from incidents where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw denied();}
+        if(em.createNativeQuery("select id from app_users where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw missing();}
+    private void lockIncident(Long id){if(id==null || id<=0 || em.createNativeQuery("select id from incidents where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw missing();}
     private void requireCapability(AppUser actor,String capability,boolean locked){
         String suffix=locked?" for update":"";
         var accounts=em.createNativeQuery("select active,email from app_users where id=?1"+suffix).setParameter(1,actor.getId()).getResultList();
@@ -67,14 +78,14 @@ public class IncidentSecurityAdministrationService {
         var actor=identity();requireCapability(actor,"INCIDENT_CLASSIFIER",false);
         @SuppressWarnings("unchecked") List<Object[]> rows=em.createNativeQuery("select i.id,i.incident_number,coalesce(c.classification,'UNCLASSIFIED'),coalesce(c.version,0) from incidents i left join incident_security_classification c on c.incident_id=i.id where c.incident_id is null or c.classification='UNCLASSIFIED' order by i.id").setMaxResults(501).getResultList();
         if(rows.size()>500)throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Too many incidents to display safely.");
-        return rows.stream().map(r->new Triage(number(r[0]),(String)r[1],(String)r[2],number(r[3]))).toList();
+        return rows.stream().filter(r -> withinScope(actor, number(r[0]))).map(r->new Triage(number(r[0]),(String)r[1],(String)r[2],number(r[3]))).toList();
 
         });
     }
     @Transactional(readOnly=true)
     public Triage classification(Long incident){
         return secureRead(() -> {
-        var actor=identity();requireCapability(actor,"INCIDENT_CLASSIFIER",false);if(incident==null || incident<=0)throw denied();
+        var actor=identity();requireCapability(actor,"INCIDENT_CLASSIFIER",false);requireScope(actor, incident);
         var rows=em.createNativeQuery("select i.id,i.incident_number,coalesce(c.classification,'UNCLASSIFIED'),coalesce(c.version,0) from incidents i left join incident_security_classification c on c.incident_id=i.id where i.id=?1").setParameter(1,incident).getResultList();
         if(rows.size()!=1)throw denied();Object[] r=(Object[])rows.get(0);
         return new Triage(number(r[0]),(String)r[1],(String)r[2],number(r[3]));
@@ -85,7 +96,7 @@ public class IncidentSecurityAdministrationService {
     public ClassificationResult classify(Long incident,String requested,Long expected,String reason){
         securityWrite();
         validateReason(reason);if(!CLASSIFICATIONS.contains(requested) || expected==null || expected<0)throw bad();
-        var actor=identity();lockAccounts(actor.getId());lockIncident(incident);requireCapability(actor,"INCIDENT_CLASSIFIER",true);
+        var actor=identity();lockAccounts(actor.getId());lockIncident(incident);requireCapability(actor,"INCIDENT_CLASSIFIER",true);requireScope(actor, incident);
         var rows=em.createNativeQuery("select classification,version from incident_security_classification where incident_id=?1 for update").setParameter(1,incident).getResultList();
         if(rows.size()>1)throw denied();String old="UNCLASSIFIED";long version=0;
         if(!rows.isEmpty()){Object[] r=(Object[])rows.get(0);old=(String)r[0];version=number(r[1]);}
@@ -96,6 +107,9 @@ public class IncidentSecurityAdministrationService {
         if(rows.isEmpty()) em.createNativeQuery("insert into incident_security_classification(incident_id,classification,version) values (?1,?2,?3)").setParameter(1,incident).setParameter(2,requested).setParameter(3,next).executeUpdate();
         else if(em.createNativeQuery("update incident_security_classification set classification=?2,version=?3 where incident_id=?1 and version=?4").setParameter(1,incident).setParameter(2,requested).setParameter(3,next).setParameter(4,version).executeUpdate()!=1)throw conflict();
         if(em.createNativeQuery("insert into incident_classification_audit(incident_id,actor_user_id,previous_classification,new_classification,version,reason) values (?1,?2,?3,?4,?5,?6)").setParameter(1,incident).setParameter(2,actor.getId()).setParameter(3,old).setParameter(4,requested).setParameter(5,next).setParameter(6,reason.trim()).executeUpdate()!=1)throw new IllegalStateException("Classification audit failed.");
+        if ("UNCLASSIFIED".equals(old)) {
+            events.publishEvent(new com.pareidolia.incidentmanagement.notification.IncidentMailReady(em.find(Incident.class, incident).getIncidentNumber()));
+        }
         return new ClassificationResult(requested,next);
     }
     @Transactional(isolation=Isolation.REPEATABLE_READ)
@@ -103,9 +117,19 @@ public class IncidentSecurityAdministrationService {
         securityWrite();
         validateReason(reason);if(target==null || target<=0 || !PERMISSIONS.contains(permission) || expected==null || expected<0)throw bad();
         var actor=identity();if(actor.getId().equals(target))throw denied();
-        lockAccounts(actor.getId(),target);lockIncident(incident);requireCapability(actor,"CASE_ACCESS_ADMIN",true);
+        lockAccounts(actor.getId(),target);requireCapability(actor,"CASE_ACCESS_ADMIN",true);
+        if (!withinScope(actor, incident)) {
+            SECURITY_AUDIT.warn("case_grant_denied actor_id={} target_id={} operation={}",
+                    actor.getId(), target, grant ? "grant" : "revoke");
+            throw missing();
+        }
+        lockIncident(incident);
         var targetRows=em.createNativeQuery("select active from app_users where id=?1 for update").setParameter(1,target).getResultList();
         if(targetRows.size()!=1 || (grant && !active(targetRows.get(0))))throw denied();
+        if (grant && !access.allowsHrScope(em.find(AppUser.class, target), em.find(Incident.class, incident))) {
+            SECURITY_AUDIT.warn("case_grant_denied actor_id={} target_id={} operation=grant", actor.getId(), target);
+            throw missing();
+        }
         var rows=em.createNativeQuery("select active,version from incident_security_grants where incident_id=?1 and user_id=?2 and permission=?3 for update").setParameter(1,incident).setParameter(2,target).setParameter(3,permission).getResultList();
         if(rows.size()>1)throw denied();Integer old=null;long version=0;
         if(!rows.isEmpty()){Object[] r=(Object[])rows.get(0);old=active(r[0])?1:0;version=number(r[1]);}
@@ -131,7 +155,7 @@ public class IncidentSecurityAdministrationService {
     @Transactional(readOnly=true)
     public List<CaseGrant> grants(Long incident){
         return secureRead(() -> {
-        var actor=identity();requireCapability(actor,"CASE_ACCESS_ADMIN",false);if(incident==null || incident<=0)throw denied();
+        var actor=identity();requireCapability(actor,"CASE_ACCESS_ADMIN",false);requireScope(actor, incident);
         @SuppressWarnings("unchecked") List<Object[]> rows=em.createNativeQuery("select g.user_id,u.display_name,u.email,g.permission,g.active,g.version from incident_security_grants g join app_users u on u.id=g.user_id where g.incident_id=?1 order by u.email,g.permission").setParameter(1,incident).setMaxResults(501).getResultList();
         if(rows.size()>500)throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Too many grants to display safely.");
         return rows.stream().map(r->new CaseGrant(number(r[0]),(String)r[1],(String)r[2],(String)r[3],active(r[4]),number(r[5]))).toList();
@@ -142,6 +166,7 @@ public class IncidentSecurityAdministrationService {
     public List<GrantHistory> grantHistory(Long incident,Long target,String permission){
         return secureRead(() -> {
         var actor=identity();requireCapability(actor,"CASE_ACCESS_ADMIN",false);if(incident==null || incident<=0 || target==null || target<=0 || !PERMISSIONS.contains(permission))throw bad();
+        requireScope(actor, incident);
         @SuppressWarnings("unchecked") List<Object[]> rows=em.createNativeQuery("select actor_user_id,old_active,new_active,version,reason,changed_at from incident_security_grant_audit where incident_id=?1 and target_user_id=?2 and permission=?3 order by version desc").setParameter(1,incident).setParameter(2,target).setParameter(3,permission).setMaxResults(201).getResultList();
         if(rows.size()>200)throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Too many audit entries.");
         return rows.stream().map(r->new GrantHistory(number(r[0]),r[1]==null?null:active(r[1]),active(r[2]),number(r[3]),(String)r[4],String.valueOf(r[5]))).toList();
@@ -151,7 +176,7 @@ public class IncidentSecurityAdministrationService {
     @Transactional(readOnly=true)
     public List<ClassificationHistory> classificationHistory(Long incident){
         return secureRead(() -> {
-        var actor=identity();requireCapability(actor,"INCIDENT_CLASSIFIER",false);if(incident==null || incident<=0)throw bad();
+        var actor=identity();requireCapability(actor,"INCIDENT_CLASSIFIER",false);requireScope(actor, incident);
         @SuppressWarnings("unchecked") List<Object[]> rows=em.createNativeQuery("select actor_user_id,previous_classification,new_classification,version,reason,changed_at from incident_classification_audit where incident_id=?1 order by version desc").setParameter(1,incident).setMaxResults(201).getResultList();
         if(rows.size()>200)throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Too many audit entries.");
         return rows.stream().map(r->new ClassificationHistory(number(r[0]),(String)r[1],(String)r[2],number(r[3]),(String)r[4],String.valueOf(r[5]))).toList();
@@ -162,6 +187,7 @@ public class IncidentSecurityAdministrationService {
     private static boolean active(Object v){if(v instanceof Boolean b)return b;if(v instanceof Number n && (n.intValue()==0 || n.intValue()==1))return n.intValue()==1;throw denied();}
     private static long number(Object v){if(v instanceof Number n)return n.longValue();throw denied();}
     private static AccessDeniedException denied(){return new AccessDeniedException("Access denied.");}
+    private static ResponseStatusException missing(){return new ResponseStatusException(HttpStatus.NOT_FOUND,"Incident not found.");}
     private static ResponseStatusException bad(){return new ResponseStatusException(HttpStatus.BAD_REQUEST,"Invalid request.");}
     private static ResponseStatusException conflict(){return new ResponseStatusException(HttpStatus.CONFLICT,"Record changed. Refresh and try again.");}
 }

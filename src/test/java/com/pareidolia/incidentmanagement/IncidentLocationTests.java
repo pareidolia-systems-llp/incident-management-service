@@ -61,7 +61,7 @@ class IncidentLocationTests {
         reporter.setRole(AppUserRole.REPORTER);
         when(users.getAuthenticatedUser()).thenReturn(reporter);
         mvc = MockMvcBuilders.standaloneSetup(new IncidentController(service),
-                new com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController(repository, users))
+                new com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController(repository, users, service))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 
@@ -90,33 +90,21 @@ class IncidentLocationTests {
     }
 
     @Test
-    void responsibleDepartmentLookupAndIncidentRoundTrip() throws Exception {
+    void departmentScopedIntakeIsUnavailableWithoutSecureAssignment() throws Exception {
         seedResponsibleDepartments();
         mvc.perform(get("/api/incidents/responsible-departments"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].id").value(72))
-                .andExpect(jsonPath("$[0].displayName").value("HR"))
-                .andExpect(jsonPath("$[1].id").value(71));
+                .andExpect(jsonPath("$.length()").value(0));
 
         var body = request();
-        body.put("reporterDepartment", "R&D");
         body.put("responsibleDepartmentId", 71);
-        String response = mvc.perform(post("/api/incidents").contentType(MediaType.APPLICATION_JSON)
+        long before = repository.count();
+        mvc.perform(post("/api/incidents").contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(body)))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.reporterDepartment").value("R&D"))
-                .andExpect(jsonPath("$.responsibleDepartmentId").value(71))
-                .andExpect(jsonPath("$.status").value("OPEN"))
-                .andReturn().getResponse().getContentAsString();
-        long id = json.readTree(response).get("id").asLong();
-        entityManager.flush();
-        entityManager.clear();
-        mvc.perform(get("/api/incidents/{id}", id))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.reporterDepartment").value("R&D"))
-                .andExpect(jsonPath("$.responsibleDepartmentId").value(71));
-        assertThat(repository.findById(id).orElseThrow().getResponsibleDepartmentId()).isEqualTo(71L);
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(
+                        "Department-scoped intake is unavailable until secure assignment is enabled."));
+        assertThat(repository.count()).isEqualTo(before);
     }
 
     @Test

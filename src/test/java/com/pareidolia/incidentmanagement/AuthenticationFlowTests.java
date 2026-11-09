@@ -56,6 +56,9 @@ class AuthenticationFlowTests {
         @Bean com.pareidolia.incidentmanagement.repository.IncidentRepository incidents() {
             return mock(com.pareidolia.incidentmanagement.repository.IncidentRepository.class);
         }
+        @Bean com.pareidolia.incidentmanagement.service.IncidentService incidentService() {
+            return mock(com.pareidolia.incidentmanagement.service.IncidentService.class);
+        }
         @Bean com.pareidolia.incidentmanagement.service.WorkLogService workLogs() {
             return mock(com.pareidolia.incidentmanagement.service.WorkLogService.class);
         }

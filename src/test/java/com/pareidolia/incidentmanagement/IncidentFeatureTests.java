@@ -114,7 +114,16 @@ class IncidentFeatureTests {
                 "/api/incidents/" + restricted.getId() + "/history",
                 "/api/incidents/" + restricted.getId() + "/attachments",
                 "/api/incidents/" + restricted.getId() + "/attachments/" + attachment.id())) {
-            mvc.perform(get(url)).andExpect(status().isNotFound());
+            mvc.perform(get(url)).andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.message").value("Incident not found."));
+        }
+        for (String url : List.of("/api/incidents/" + Long.MAX_VALUE,
+                "/api/incidents/number/INC-MISSING",
+                "/api/incidents/" + Long.MAX_VALUE + "/history",
+                "/api/incidents/" + Long.MAX_VALUE + "/attachments",
+                "/api/incidents/" + Long.MAX_VALUE + "/attachments/" + attachment.id())) {
+            mvc.perform(get(url)).andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.message").value("Incident not found."));
         }
         var export = mvc.perform(get("/api/reports/incidents/monthly").param("year", "2026").param("month", "10"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();

@@ -28,6 +28,24 @@ public class IncidentAssignmentController {
             @RequestParam Long destinationDepartmentId, @RequestParam String search) {
         return service.transferHandlers(id, destinationDepartmentId, search);
     }
+    public record HandoffCreated(String reference) { }
+    @GetMapping("/{id}/transfer/handoffs")
+    public java.util.List<IncidentAssignmentService.Handoff> handoffs(@PathVariable Long id) {
+        return service.handoffs(id);
+    }
+    @PostMapping("/{id}/transfer/handoffs")
+    public HandoffCreated requestHandoff(@PathVariable Long id, @RequestBody IncidentAssignmentService.HandoffRequest request) {
+        return new HandoffCreated(service.requestHandoff(id, request));
+    }
+    @GetMapping("/{id}/transfer/handoffs/{reference}/history")
+    public java.util.List<IncidentAssignmentService.HandoffAudit> handoffHistory(@PathVariable Long id, @PathVariable String reference) {
+        return service.handoffHistory(id, reference);
+    }
+    @PutMapping("/{id}/transfer/handoffs/{reference}")
+    public void decideHandoff(@PathVariable Long id, @PathVariable String reference,
+            @RequestBody IncidentAssignmentService.HandoffDecision decision) {
+        service.decideHandoff(id, reference, decision);
+    }
     @PostMapping("/{id}/transfer")
     public IncidentAssignmentService.TransferResult transfer(@PathVariable Long id, @Valid @RequestBody IncidentTransferRequest request) {
         return service.transfer(id, request);

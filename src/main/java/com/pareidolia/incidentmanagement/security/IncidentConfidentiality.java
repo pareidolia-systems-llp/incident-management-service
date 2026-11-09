@@ -23,6 +23,11 @@ public final class IncidentConfidentiality {
                     + "|unauthorized[\\s_-]+access|account[\\s_-]+compromise|suspicious[\\s_-]+(?:login|email))\\b",
             Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern HR_HINT = Pattern.compile(
+            "\\b(?:hr|human[\\s_-]+resources|payroll|salar(?:y|ies)|medical|grievance|harassment"
+                    + "|benefits|compensation|discrimination|employee[\\s_-]+relations|leave[\\s_-]+request"
+                    + "|confidential[\\s_-]+complaint)\\b", Pattern.CASE_INSENSITIVE);
+
     private static final Set<String> CLASSIFICATIONS = Set.of("UNCLASSIFIED", "STANDARD", "RESTRICTED");
 
     private IncidentConfidentiality() { }
@@ -42,6 +47,17 @@ public final class IncidentConfidentiality {
                         incident.getCategory(), incident.getTitle(), incident.getDescription(),
                         incident.getAffectedSystem(), incident.getImpactedUserOrDepartment())
                 .anyMatch(value -> value != null && PROTECTED_HINT.matcher(value).find());
+    }
+
+    public static boolean isHrDepartment(String department) {
+        return department != null && HR_HINT.matcher(department).find();
+    }
+
+    public static boolean isHrCase(Incident incident, String responsibleDepartment) {
+        return incident.getIssueType() == IssueType.HR_ISSUE
+                || java.util.stream.Stream.of(responsibleDepartment, incident.getReporterDepartment(), incident.getCategory(),
+                        incident.getTitle(), incident.getDescription(), incident.getAffectedSystem(), incident.getImpactedUserOrDepartment())
+                        .anyMatch(value -> value != null && HR_HINT.matcher(value).find());
     }
 
     /** A missing row is valid for a legacy incident, but an unreadable or invalid result is not. */

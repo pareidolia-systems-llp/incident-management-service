@@ -7,7 +7,7 @@ import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
 
-/** The operator-supplied handoff reference is format-checked, not independently verified. */
+/** The handoff reference identifies a separately issued approval that the transfer service verifies. */
 public record IncidentTransferRequest(
         @NotNull @Positive Long expectedSourceDepartmentId,
         @NotNull @Positive Long destinationDepartmentId,

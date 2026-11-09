@@ -1,6 +1,7 @@
 package com.pareidolia.incidentmanagement.controller;
 
 import com.pareidolia.incidentmanagement.service.DepartmentMembershipAdminService;
+import com.pareidolia.incidentmanagement.dto.ActiveEmployeeEmailResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -27,6 +29,16 @@ public class DepartmentMembershipAdminController {
 
     public DepartmentMembershipAdminController(DepartmentMembershipAdminService memberships) {
         this.memberships = memberships;
+    }
+
+    @GetMapping("/departments")
+    public List<DepartmentMembershipAdminService.Department> departments() {
+        return memberships.departments();
+    }
+
+    @GetMapping("/employees")
+    public List<ActiveEmployeeEmailResponse> searchEmployees(@RequestParam String search) {
+        return memberships.searchEmployees(search);
     }
 
     @GetMapping("/{departmentId}")

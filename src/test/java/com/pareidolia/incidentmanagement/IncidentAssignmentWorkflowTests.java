@@ -54,6 +54,7 @@ class IncidentAssignmentWorkflowTests {
     @Autowired com.pareidolia.incidentmanagement.service.IncidentAttachmentService attachments;
     @Autowired IncidentCapabilityAdministrationService capabilityAdmin;
     @Autowired IncidentReportService reports;
+    @Autowired IncidentAccessPolicy incidentAccessPolicy;
     @Autowired DepartmentMembershipAdminService memberships;
     AppUser reporter,assigner,handler,alternate,classifier,membershipAdmin;Incident incident;
     @BeforeEach void setup(){
@@ -66,11 +67,13 @@ class IncidentAssignmentWorkflowTests {
                 db.execute("alter table app_users add column employee_id varchar(64) unique");
                 db.execute("create table employee_departments (id bigint primary key, display_name varchar(150) not null unique, active tinyint not null)");
             }
-            for(String script:List.of("handler-eligibility.REVIEW-ONLY.sql","incident-security-administration.REVIEW-ONLY.sql","incident-security-lock.REVIEW-ONLY.sql","assignment-schema.REVIEW-ONLY.sql","department-membership.REVIEW-ONLY.sql","department-membership-administration.REVIEW-ONLY.sql","incident-department-transfer.REVIEW-ONLY.sql"))new ResourceDatabasePopulator(new FileSystemResource(Path.of("docs","assignment",script))).execute(source);
+            for(String script:List.of("handler-eligibility.REVIEW-ONLY.sql","incident-security-administration.REVIEW-ONLY.sql","incident-security-lock.REVIEW-ONLY.sql","assignment-schema.REVIEW-ONLY.sql","department-membership.REVIEW-ONLY.sql","department-membership-administration.REVIEW-ONLY.sql","incident-department-transfer.REVIEW-ONLY.sql","incident-transfer-handoff-approval.REVIEW-ONLY.sql"))new ResourceDatabasePopulator(new FileSystemResource(Path.of("docs","assignment",script))).execute(source);
         }
-        for(String table:List.of("incident_department_transfer_audit","incident_global_view_audit","incident_attachments","incident_assignment_audit","incident_assignment_state","incident_security_grant_audit","incident_classification_audit","assignment_admin_capability_audit","handler_eligibility_audit","incident_security_grants","incident_security_classification","assignment_admin_capabilities","handler_eligibility_grants","incident_history","work_log_entries","incidents","employee_department_membership_audit","employee_department_memberships","employee_departments","app_users"))db.update("delete from "+table);
+        for(String table:List.of("incident_transfer_handoff_audit","incident_transfer_handoff_approvals","incident_department_transfer_audit","incident_global_view_audit","incident_attachments","incident_assignment_audit","incident_assignment_state","incident_security_grant_audit","incident_classification_audit","assignment_admin_capability_audit","handler_eligibility_audit","incident_security_grants","incident_security_classification","assignment_admin_capabilities","handler_eligibility_grants","incident_history","work_log_entries","incidents","employee_department_membership_audit","employee_department_memberships","employee_departments","app_users"))db.update("delete from "+table);
         reporter=account("reporter@example.test",AppUserRole.REPORTER);assigner=account("assigner@example.test",AppUserRole.ADMIN);handler=account("handler@example.test",AppUserRole.IT_HANDLER);alternate=account("alternate@example.test",AppUserRole.IT_HANDLER);classifier=account("classifier@example.test",AppUserRole.REPORTER);
         membershipAdmin = account("membership@example.test", AppUserRole.REPORTER);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
+                assigner.getId() + "," + handler.getId() + "," + alternate.getId() + "," + classifier.getId());
         db.update("insert into employee_departments(id,display_name,active) values (71,'IT',1),(72,'Human Resources',1)");
         for (var user : List.of(handler, alternate)) {
             db.update("insert into handler_eligibility_grants(user_id,active,version) values (?,1,0)", user.getId());
@@ -87,6 +90,21 @@ class IncidentAssignmentWorkflowTests {
     void grant(Long user,String permission){db.update("insert into incident_security_grants(incident_id,user_id,permission,active,version) values (?,?,?,1,1)",incident.getId(),user,permission);}
     void standard(){login(classifier);administration.classify(incident.getId(),"STANDARD",0L,"Synthetic triage");grant(assigner.getId(),"VIEW");for(var user:List.of(handler,alternate)){grant(user.getId(),"VIEW");grant(user.getId(),"HANDLE");}login(assigner);}
     void conflict(Runnable work){assertThatThrownBy(work::run).isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));}
+    @Test
+    void membershipDiscoveryUsesIndependentAuthorizationAndOnlyActiveTargets() {
+        login(assigner);
+        assertThatThrownBy(memberships::departments).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> memberships.searchEmployees("example")).isInstanceOf(AccessDeniedException.class);
+        db.update("update app_users set active=0 where id=?", alternate.getId());
+        db.update("update employee_departments set active=0 where id=72");
+        login(membershipAdmin);
+        assertThat(memberships.departments()).extracting(DepartmentMembershipAdminService.Department::id)
+                .containsExactly(71L);
+        assertThat(memberships.searchEmployees("example")).extracting(
+                com.pareidolia.incidentmanagement.dto.ActiveEmployeeEmailResponse::id)
+                .contains(handler.getId()).doesNotContain(membershipAdmin.getId(), alternate.getId());
+    }
+
     @Test
     void membershipChangesAreVersionedAuditedAndIndependentOfOtherGrants() {
         login(membershipAdmin);
@@ -484,6 +502,7 @@ class IncidentAssignmentWorkflowTests {
         grant(alternate.getId(), "VIEW");
         grant(alternate.getId(), "HANDLE");
         addTransferDestination();
+        recordHandoffApproval(0);
         login(handler);
         assertThatThrownBy(() -> assignments.transfer(incident.getId(), transferRequest(71, 73, 0, 1)))
                 .isInstanceOf(AccessDeniedException.class);
@@ -598,6 +617,90 @@ class IncidentAssignmentWorkflowTests {
         assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Initial assignment");
         grant(assigner.getId(), "ASSIGN");
         addTransferDestination();
+        recordHandoffApproval(1);
+    }
+
+    @Test
+    void handoffRequestRequiresIndependentDecisionAndRecordsHistory() {
+        prepareTransfer();
+        reconcileFormerHandler();
+        var reviewer = account("handoff-reviewer@example.test", AppUserRole.ADMIN);
+        grant(reviewer.getId(), "VIEW");
+        org.springframework.test.util.ReflectionTestUtils.setField(assignments, "handoffReviewerRoutes",
+                reviewer.getId() + ":71:73");
+        var request = new IncidentAssignmentService.HandoffRequest(71L, 73L, alternate.getId(), 1L, 1L, "Request");
+        String reference = assignments.requestHandoff(incident.getId(), request);
+        var approve = new IncidentAssignmentService.HandoffDecision("APPROVED", 0L, "Independent review");
+        assertThatThrownBy(() -> assignments.decideHandoff(incident.getId(), reference, approve))
+                .isInstanceOf(AccessDeniedException.class);
+
+        login(reviewer);
+        assignments.decideHandoff(incident.getId(), reference, approve);
+        assertThat(assignments.handoffHistory(incident.getId(), reference)).extracting(IncidentAssignmentService.HandoffAudit::status)
+                .containsExactly("PENDING", "APPROVED");
+        assignments.decideHandoff(incident.getId(), reference,
+                new IncidentAssignmentService.HandoffDecision("REVOKED", 1L, "Approval withdrawn"));
+        login(assigner);
+        assertThat(assignments.handoffs(incident.getId())).anyMatch(row -> row.reference().equals(reference)
+                && "REVOKED".equals(row.status()) && !row.canUse());
+
+        String second = assignments.requestHandoff(incident.getId(), request);
+        login(reviewer);
+        assignments.decideHandoff(incident.getId(), second,
+                new IncidentAssignmentService.HandoffDecision("REJECTED", 0L, "Further review required"));
+        assertThat(assignments.handoffHistory(incident.getId(), second)).extracting(IncidentAssignmentService.HandoffAudit::status)
+                .containsExactly("PENDING", "REJECTED");
+
+        login(assigner);
+        String third = assignments.requestHandoff(incident.getId(), request);
+        login(reviewer);
+        assignments.decideHandoff(incident.getId(), third, approve);
+        login(classifier);
+        administration.setGrant(incident.getId(), reviewer.getId(), "VIEW", false, 1L, "Review access reconciled");
+        login(assigner);
+        var approvedTransfer = new IncidentTransferRequest(71L, 73L, alternate.getId(), 1L, 1L, "Transfer", third);
+        assertThat(assignments.transfer(incident.getId(), approvedTransfer).responsibleDepartmentId()).isEqualTo(73);
+    }
+
+    private void recordHandoffApproval(long assignmentVersion) {
+        org.springframework.test.util.ReflectionTestUtils.setField(assignments, "handoffReviewerRoutes",
+                classifier.getId() + ":71:73");
+        db.update("""
+                insert into incident_transfer_handoff_approvals
+                    (approval_reference, incident_id, coordinator_user_id, source_department_id,
+                     destination_department_id, destination_handler_user_id, assignment_version,
+                     classification_version, approved_by_user_id, expires_at, decision_status, decision_version)
+                values ('REVIEW-42', ?, ?, 71, 73, ?, ?, 1, ?, ?, 'APPROVED', 1)
+                """, incident.getId(), assigner.getId(), alternate.getId(), assignmentVersion, classifier.getId(),
+                java.sql.Timestamp.valueOf(java.time.LocalDateTime.now().plusHours(1)));
+        db.update("""
+                insert into incident_transfer_handoff_audit
+                    (approval_reference, decision_version, actor_user_id, decision_status, reason)
+                values ('REVIEW-42', 1, ?, 'APPROVED', 'Synthetic approval')
+                """, classifier.getId());
+    }
+
+    @Test
+    void handoffRejectsUnrecordedRevokedExpiredAndWrongVersionApprovals() {
+        prepareTransfer();
+        reconcileFormerHandler();
+        var request = transferRequest(71, 73, 1, 1);
+        db.update("delete from incident_transfer_handoff_audit where approval_reference='REVIEW-42'");
+        db.update("delete from incident_transfer_handoff_approvals where approval_reference='REVIEW-42'");
+        conflict(() -> assignments.transfer(incident.getId(), request));
+        recordHandoffApproval(1);
+        db.update("update incident_transfer_handoff_approvals set revoked_at=current_timestamp");
+        conflict(() -> assignments.transfer(incident.getId(), request));
+        db.update("""
+                update incident_transfer_handoff_approvals set revoked_at=null, approved_at=?, expires_at=?
+                """, java.sql.Timestamp.valueOf(java.time.LocalDateTime.now().minusHours(2)),
+                java.sql.Timestamp.valueOf(java.time.LocalDateTime.now().minusHours(1)));
+        conflict(() -> assignments.transfer(incident.getId(), request));
+        db.update("delete from incident_transfer_handoff_audit where approval_reference='REVIEW-42'");
+        db.update("delete from incident_transfer_handoff_approvals where approval_reference='REVIEW-42'");
+        recordHandoffApproval(0);
+        conflict(() -> assignments.transfer(incident.getId(), request));
+        assertThat(transferAuditCount()).isZero();
     }
 
     private void addTransferDestination() {
@@ -627,10 +730,14 @@ class IncidentAssignmentWorkflowTests {
     }
 
     @Test
-    void globalViewerReadsAllDepartmentsWithAuditButCannotMutateOrManagePermissions() throws Exception {
+    void globalViewerReadsStandardCasesButRestrictedCasesNeedIndependentGrants() throws Exception {
         long it = incident.getId();
         long hr = createCase(IssueType.HR_ISSUE, 72L);
         long security = createCase(IssueType.INFORMATION_SECURITY_INCIDENT, 71L);
+        login(classifier);
+        administration.classify(it, "STANDARD", 0L, "Ordinary issue");
+        administration.classify(hr, "RESTRICTED", 0L, "Confidential HR");
+        administration.classify(security, "RESTRICTED", 0L, "Confidential security");
         login(assigner);
         assertThat(incidentService.getAllIncidents()).isEmpty();
         assertThatThrownBy(() -> incidentService.getIncident(hr))
@@ -638,7 +745,7 @@ class IncidentAssignmentWorkflowTests {
         assertThatThrownBy(() -> capabilityAdmin.change(assigner.getId(), IncidentAccessPolicy.GLOBAL_INCIDENT_VIEW,
                 true, 0L, "Unauthorized")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
 
-        var viewer = account("global-viewer@example.test", AppUserRole.REPORTER);
+        var viewer = account("global-viewer@example.test", AppUserRole.ADMIN);
         login(classifier);
         long version = capabilityAdmin.change(viewer.getId(), IncidentAccessPolicy.GLOBAL_INCIDENT_VIEW,
                 true, 0L, "Synthetic ISMS approval");
@@ -647,8 +754,8 @@ class IncidentAssignmentWorkflowTests {
 
         login(viewer);
         assertThat(incidentService.getAllIncidents()).extracting(IncidentResponseDto::getId)
-                .containsExactlyInAnyOrder(it, hr, security);
-        for (long id : List.of(it, hr, security)) {
+                .containsExactly(it);
+        for (long id : List.of(it)) {
             var detail = incidentService.getIncident(id);
             assertThat(incidentService.getIncidentByNumber(detail.getIncidentNumber()).getId()).isEqualTo(id);
             assertThat(incidentService.getIncidentHistory(id)).isNotEmpty();
@@ -656,14 +763,18 @@ class IncidentAssignmentWorkflowTests {
         db.update("""
                 insert into incident_attachments(incident_id,original_filename,content_type,file_size,file_data,uploaded_by,uploaded_at)
                 values (?, 'synthetic.png', 'image/png', 2, ?, 'synthetic@example.test', current_timestamp)
-                """, hr, new byte[]{1,2});
-        long attachment = db.queryForObject("select id from incident_attachments where incident_id=?", Long.class, hr);
-        assertThat(attachments.list(hr)).hasSize(1);
-        assertThat(attachments.content(hr, attachment)).isNotNull();
+                """, it, new byte[]{1,2});
+        long attachment = db.queryForObject("select id from incident_attachments where incident_id=?", Long.class, it);
+        assertThat(attachments.list(it)).hasSize(1);
+        assertThat(attachments.content(it, attachment)).isNotNull();
+        assertThatThrownBy(() -> incidentService.getIncident(hr))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        assertThatThrownBy(() -> attachments.list(hr))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
         var today = java.time.LocalDate.now();
         try (var workbook = new org.apache.poi.xssf.usermodel.XSSFWorkbook(new java.io.ByteArrayInputStream(
                 reports.monthly(today.getYear(), today.getMonthValue())))) {
-            assertThat(workbook.getSheet("Incidents").getPhysicalNumberOfRows()).isEqualTo(4);
+            assertThat(workbook.getSheet("Incidents").getPhysicalNumberOfRows()).isEqualTo(2);
         }
         assertThat(db.queryForList("select distinct operation from incident_global_view_audit where actor_user_id=?",
                 String.class, viewer.getId())).contains("LIST", "DETAIL", "NUMBER_LOOKUP", "HISTORY",
@@ -678,6 +789,39 @@ class IncidentAssignmentWorkflowTests {
                 true, 0L, "View only")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
 
         login(classifier);
+        assertThatThrownBy(() -> administration.setGrant(hr, viewer.getId(), "VIEW", true, 0L, "Unauthorized"))
+                .isInstanceOf(ResponseStatusException.class);
+        db.update("insert into incident_security_grants(incident_id,user_id,permission,active,version) values (?,?,'VIEW',1,1)",
+                hr, viewer.getId());
+        db.update("insert into incident_security_grants(incident_id,user_id,permission,active,version) values (?,?,'REPORT',1,1)",
+                hr, viewer.getId());
+        login(viewer);
+        assertThatThrownBy(() -> incidentService.getIncident(hr))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        assertThat(incidentService.getAllIncidents()).extracting(IncidentResponseDto::getId).containsExactly(it);
+        login(classifier);
+        login(viewer);
+        try (var workbook = new org.apache.poi.xssf.usermodel.XSSFWorkbook(new java.io.ByteArrayInputStream(
+                reports.monthly(today.getYear(), today.getMonthValue())))) {
+            assertThat(workbook.getSheet("Incidents").getPhysicalNumberOfRows()).isEqualTo(2);
+        }
+        db.update("insert into assignment_admin_capabilities(user_id,capability,active,version) values (?,'INCIDENT_CLASSIFIER',1,0),(?,'CASE_ACCESS_ADMIN',1,0)",
+                viewer.getId(), viewer.getId());
+        assertThatThrownBy(() -> administration.classification(hr)).isInstanceOf(ResponseStatusException.class);
+        assertThatThrownBy(() -> administration.grants(hr)).isInstanceOf(ResponseStatusException.class);
+        assertThatThrownBy(() -> administration.setGrant(hr, handler.getId(), "VIEW", true, 0L, "Denied"))
+                .isInstanceOf(ResponseStatusException.class);
+        login(classifier);
+        db.update("delete from incident_security_grants where incident_id=? and user_id=?", hr, viewer.getId());
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
+                classifier.getId() + "," + viewer.getId());
+        administration.setGrant(hr, viewer.getId(), "VIEW", true, 0L, "Synthetic case-scoped HR oversight");
+        login(viewer);
+        assertThat(incidentService.getIncident(hr).getId()).isEqualTo(hr);
+        assertThat(incidentService.getAllIncidents()).extracting(IncidentResponseDto::getId)
+                .containsExactlyInAnyOrder(it, hr);
+        login(classifier);
+        administration.setGrant(hr, viewer.getId(), "VIEW", false, 1L, "Synthetic oversight ended");
         capabilityAdmin.change(viewer.getId(), IncidentAccessPolicy.GLOBAL_INCIDENT_VIEW, false, version, "Revoked");
         login(viewer);
         assertThat(incidentService.getAllIncidents()).isEmpty();
@@ -793,7 +937,7 @@ class IncidentAssignmentWorkflowTests {
         standard();
         db.update("update employee_departments set active=0 where id=71");
         assertThatThrownBy(() -> assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Inactive department"))
-                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+                .isInstanceOf(ResponseStatusException.class);
         db.update("update incidents set responsible_department_id=null where id=?", incident.getId());
         assertThatThrownBy(() -> assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Missing department"))
                 .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);

@@ -91,9 +91,15 @@ public class IncidentServiceImpl implements IncidentService {
         AppUser actor = getAuthenticatedUser();
         requireRole(actor, AppUserRole.REPORTER, AppUserRole.ADMIN);
 
+        if(employeeAssignmentEnabled && (!incidentAccessEnabled || employeeAssignment==null))throw new IllegalStateException("Secure assignment dependencies unavailable.");
+        if(!employeeAssignmentEnabled && request.getProposedHandlerUserId()!=null)throw new IllegalArgumentException("Employee assignment is disabled.");
+
         Long departmentId = request.getResponsibleDepartmentId();
         String responsibleDepartmentName = null;
         if (departmentId != null) {
+            if (!departmentScopedIntakeAvailable()) {
+                throw new InvalidRequestException("Department-scoped intake is unavailable until secure assignment is enabled.");
+            }
             if (departmentId <= 0) {
                 throw new InvalidRequestException("Select an active responsible department.");
             }
@@ -104,8 +110,6 @@ public class IncidentServiceImpl implements IncidentService {
         Incident incident = incidentMapper.toEntity(request);
         incident.setReportedBy(actor.getEmail());
         incident.setIncidentNumber(generateIncidentNumber());
-        if(employeeAssignmentEnabled && (!incidentAccessEnabled || employeeAssignment==null))throw new IllegalStateException("Secure assignment dependencies unavailable.");
-        if(!employeeAssignmentEnabled && request.getProposedHandlerUserId()!=null)throw new IllegalArgumentException("Employee assignment is disabled.");
         boolean pending = incidentAccessEnabled || departmentId != null
                 || IncidentConfidentiality.requiresRestriction(incident, responsibleDepartmentName);
         incident.setAssignedOwner(pending ? null : defaultItOwner);
@@ -154,7 +158,7 @@ public class IncidentServiceImpl implements IncidentService {
         return secureRead(() -> {
         AppUser actor = getAuthenticatedUser();
         Incident incident = incidentRepository.findByIncidentNumber(incidentNumber)
-                .orElseThrow(() -> new IncidentNotFoundException(incidentAccessEnabled ? "Incident not found." : "Incident not found with number: " + incidentNumber));
+                .orElseThrow(() -> new IncidentNotFoundException("Incident not found."));
         ensureCanViewIncident(actor, incident, ReadOperation.NUMBER_LOOKUP);
         return toResponseDto(incident);
 
@@ -241,7 +245,15 @@ public class IncidentServiceImpl implements IncidentService {
         ensureNotClosed(incident, "reclassify");
 
         String oldIssueType = enumValue(incident.getIssueType());
+        if (incident.getIssueType() == com.pareidolia.incidentmanagement.enums.IssueType.HR_ISSUE
+                && request.getIssueType() != incident.getIssueType()) {
+            throw new InvalidRequestException("An HR issue cannot be changed to another issue type.");
+        }
         incident.setIssueType(request.getIssueType());
+        if (incident.getIssueType() == com.pareidolia.incidentmanagement.enums.IssueType.HR_ISSUE
+                && (!incidentAccessEnabled || !policyForRead().allowsHrOperations(actor, incident))) {
+            throw new IncidentNotFoundException("Incident not found.");
+        }
         recordHistory(incident, HistoryActionType.ISSUE_TYPE_CHANGED, oldIssueType, enumValue(request.getIssueType()),
                 actor.getEmail(), request.getRemarks());
 
@@ -487,9 +499,14 @@ public class IncidentServiceImpl implements IncidentService {
         }
     }
 
+    @Override
+    public boolean departmentScopedIntakeAvailable() {
+        return incidentAccessEnabled && employeeAssignmentEnabled && employeeAssignment != null;
+    }
+
     private Incident findIncident(Long id) {
         return incidentRepository.findById(id)
-                .orElseThrow(() -> new IncidentNotFoundException(incidentAccessEnabled ? "Incident not found." : "Incident not found with id: " + id));
+                .orElseThrow(() -> new IncidentNotFoundException("Incident not found."));
     }
 
     private AppUser getAuthenticatedUser() {

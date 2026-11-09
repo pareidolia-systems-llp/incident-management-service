@@ -30,7 +30,8 @@ import static org.mockito.Mockito.*;
  "spring.jpa.hibernate.ddl-auto=create-drop","spring.jpa.show-sql=false","app.department-routing.enabled=false","app.notifications.in-app.enabled=false",
  "app.notifications.email.v2.enabled=true","app.notifications.email.v2.routine-routing-enabled=true","app.notifications.email.v2.details-enabled=false","app.notifications.email.portal-origin=https://portal.example.test","app.default-it-owner=owner@example.test","app.notifications.email.enabled=true","app.notifications.email.from=sender@example.test",
  "app.notifications.email.it-recipients=oversight@example.test,blocked@example.test","app.notifications.email.hr-recipients=oversight@example.test",
- "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test,schakravorty@pareidolia.in,it-department@example.test,unrelated-hr@example.test",
+ "app.notifications.email.hr-case-recipients=hr-mailbox@example.test",
+ "app.notifications.email.dev-allowlist=oversight@example.test,annotations@example.test,annotations02@example.test,hr-mailbox@example.test,it-department@example.test,unrelated-hr@example.test",
  "app.notifications.email.v2.department-recipients=Operations (Annotation)=annotations@example.test,annotations02@example.test;HR=unrelated-hr@example.test;IT=it-department@example.test",
  "app.notifications.email.smtp.host=127.0.0.1",
  "app.notifications.email.smtp.username=","app.notifications.email.smtp.password=","app.notifications.email.smtp.starttls=false"})
@@ -51,6 +52,8 @@ class IncidentEmailV2SmtpTests {
     @Autowired ThreadPoolTaskExecutor incidentEmailExecutor;
     @Autowired org.springframework.mail.javamail.JavaMailSender mailSender;
     @MockitoBean AppUserService users;
+    @MockitoBean IncidentAssignmentService assignment;
+    @MockitoBean com.pareidolia.incidentmanagement.security.IncidentSecurityGate gate;
 
     @BeforeEach void setup() { var sender=(org.springframework.mail.javamail.JavaMailSenderImpl)mailSender;
         assertThat(sender.getHost()).isEqualTo("127.0.0.1"); assertThat(sender.getPort()).isEqualTo(CAPTURE.port());
@@ -88,7 +91,7 @@ class IncidentEmailV2SmtpTests {
         var request=request();request.setReporterDepartment("Operations (Annotation)");
         seedDepartments();
         request.setResponsibleDepartmentId(71L);
-        var created = incidents.createIncident(request);drain();
+        var created = createScoped(request);drain();
         assertThat(created.getResponsibleDepartmentId()).isEqualTo(71L);
         assertThat(created.getReporterDepartment()).isEqualTo("Operations (Annotation)");
         assertThat(CAPTURE.messages).hasSize(3);
@@ -109,7 +112,7 @@ class IncidentEmailV2SmtpTests {
         var request = request();
         request.setReporterDepartment("Operations (Annotation)");
         request.setResponsibleDepartmentId(72L);
-        var created = incidents.createIncident(request);
+        var created = createScoped(request);
         drain();
 
         assertThat(created.getResponsibleDepartmentId()).isEqualTo(72L);
@@ -121,7 +124,7 @@ class IncidentEmailV2SmtpTests {
                 .findFirst().orElseThrow();
         assertThat(event.responsibleDepartmentName()).isEqualTo("Human Resources");
         assertThat(CAPTURE.messages).singleElement().satisfies(message ->
-                assertThat(message).contains("To: schakravorty@pareidolia.in", "text/plain", "text/html",
+                assertThat(message).contains("To: hr-mailbox@example.test", "text/plain", "text/html",
                                 "https://portal.example.test/")
                         .doesNotContain(created.getIncidentNumber(), "private diagnostic notes",
                                 "oversight@example.test", "annotations@example.test", "unrelated-hr@example.test"));
@@ -134,9 +137,20 @@ class IncidentEmailV2SmtpTests {
         request.setReporterDepartment("Operations (Annotation)");
         request.setResponsibleDepartmentId(72L);
         request.setIssueType(IssueType.SUSPECTED_SECURITY_INCIDENT);
-        incidents.createIncident(request);
+        createScoped(request);
         drain();
         assertThat(CAPTURE.messages).isEmpty();
+    }
+
+    private com.pareidolia.incidentmanagement.dto.IncidentResponseDto createScoped(CreateIncidentRequestDto request) {
+        var service = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(incidents);
+        var fields = java.util.List.of("incidentAccessEnabled", "employeeAssignmentEnabled");
+        fields.forEach(field -> org.springframework.test.util.ReflectionTestUtils.setField(service, field, true));
+        try {
+            return incidents.createIncident(request);
+        } finally {
+            fields.forEach(field -> org.springframework.test.util.ReflectionTestUtils.setField(service, field, false));
+        }
     }
 
     private void seedDepartments() {

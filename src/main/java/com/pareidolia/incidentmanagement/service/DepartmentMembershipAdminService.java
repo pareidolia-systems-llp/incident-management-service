@@ -1,6 +1,10 @@
 package com.pareidolia.incidentmanagement.service;
 
 import com.pareidolia.incidentmanagement.entity.AppUser;
+import com.pareidolia.incidentmanagement.dto.ActiveEmployeeEmailResponse;
+import com.pareidolia.incidentmanagement.repository.AppUserRepository;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import com.pareidolia.incidentmanagement.security.IncidentReadSnapshot;
 import com.pareidolia.incidentmanagement.security.IncidentSecurityGate;
 import jakarta.persistence.EntityManager;
@@ -31,6 +35,7 @@ public class DepartmentMembershipAdminService {
 
     private final EntityManager em;
     private final AppUserService users;
+    private final AppUserRepository accounts;
     private final IncidentSecurityGate gate;
     private final IncidentReadSnapshot snapshot;
     private final Set<String> administrators;
@@ -38,12 +43,13 @@ public class DepartmentMembershipAdminService {
     private final TransactionTemplate ordinaryTransaction;
     private final MembershipCommandConnection commandConnection;
 
-    public DepartmentMembershipAdminService(EntityManager em, AppUserService users, IncidentSecurityGate gate,
+    public DepartmentMembershipAdminService(EntityManager em, AppUserService users, AppUserRepository accounts, IncidentSecurityGate gate,
             IncidentReadSnapshot snapshot, DataSource ordinaryDataSource, PlatformTransactionManager transactionManager,
             ObjectProvider<MembershipCommandConnection> commandConnection,
             @Value("${app.department-membership-admin.allowed-emails:}") String configured) {
         this.em = em;
         this.users = users;
+        this.accounts = accounts;
         this.gate = gate;
         this.snapshot = snapshot;
         this.ordinaryJdbc = JdbcClient.create(ordinaryDataSource);
@@ -51,6 +57,36 @@ public class DepartmentMembershipAdminService {
         this.commandConnection = commandConnection.getIfAvailable();
         this.administrators = Arrays.stream(configured.split(",")).map(AppUserService::normalizeEmail)
                 .filter(email -> !email.isEmpty()).collect(Collectors.toUnmodifiableSet());
+    }
+
+    public record Department(long id, String name) { }
+
+    public List<Department> departments() {
+        return snapshot.read(() -> {
+            administrator();
+            @SuppressWarnings("unchecked")
+            List<Object[]> rows = em.createNativeQuery("""
+                    select id, display_name from employee_departments
+                    where active = 1 order by display_name, id
+                    """).setMaxResults(501).getResultList();
+            if (rows.size() > 500) throw tooMany();
+            return rows.stream().map(row -> new Department(number(row[0]), (String) row[1])).toList();
+        });
+    }
+
+    public List<ActiveEmployeeEmailResponse> searchEmployees(String search) {
+        return snapshot.read(() -> {
+            AppUser actor = administrator();
+            String term = search == null ? "" : search.trim();
+            if (term.length() < 2 || term.length() > 255) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter at least two email characters.");
+            }
+            return accounts.findByActiveTrueAndEmailContainingIgnoreCase(term,
+                    PageRequest.of(0, 10, Sort.by("email", "id"))).getContent().stream()
+                    .filter(user -> !actor.getId().equals(user.getId()))
+                    .map(user -> new ActiveEmployeeEmailResponse(user.getId(), user.getDisplayName(), user.getEmail()))
+                    .toList();
+        });
     }
 
     public List<Membership> list(Long departmentId) {

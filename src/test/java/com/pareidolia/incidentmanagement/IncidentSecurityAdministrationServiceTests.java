@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 @DataJpaTest(properties={"app.incident-security-admin.enabled=true","app.incident-access.enabled=true"})
-@Import({IncidentSecurityAdministrationService.class,com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class,com.pareidolia.incidentmanagement.security.IncidentReadSnapshot.class})
+@Import({IncidentSecurityAdministrationService.class,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.class,com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class,com.pareidolia.incidentmanagement.security.IncidentReadSnapshot.class})
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentSecurityAdministrationServiceTests {
     @Autowired JdbcTemplate db; @Autowired AppUserRepository users; @Autowired IncidentRepository incidents;
