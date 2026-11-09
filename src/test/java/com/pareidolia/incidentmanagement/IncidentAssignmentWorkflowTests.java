@@ -719,9 +719,9 @@ class IncidentAssignmentWorkflowTests {
         login(reporter);assertThat(incidentService.validateIncident(incident.getId(),validation).getStatus()).isEqualTo(IncidentStatus.VALIDATED);assertThat(incidentService.closeIncident(incident.getId(),new CloseIncidentRequestDto()).getStatus()).isEqualTo(IncidentStatus.CLOSED);
         login(assigner);assertThatThrownBy(()->assignments.assign(incident.getId(),alternate.getId(),1L,1L,"Closed incident")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
     }
-    @Test void legacyMissingStateIsUnclassifiedAndNeverInfersIdentityFromOwner(){
+    @Test void legacyMissingClassificationRequiresTriageAndNeverInfersIdentityFromOwner(){
         db.update("delete from incident_assignment_state where incident_id=?",incident.getId());db.update("delete from incident_security_classification where incident_id=?",incident.getId());db.update("update incidents set assigned_owner=? where id=?",handler.getEmail(),incident.getId());
-        assertThat(assignments.get(incident.getId()).classification()).isEqualTo("UNCLASSIFIED");assertThat(assignments.get(incident.getId()).handler()).isNull();standard();assertThat(assignments.assign(incident.getId(),alternate.getId(),0L,1L,"Explicit legacy triage").handler().id()).isEqualTo(alternate.getId());assertThat(assignments.history(incident.getId()).get(0).previousHandlerId()).isNull();
+        assertThatThrownBy(() -> assignments.get(incident.getId())).isInstanceOf(ResponseStatusException.class);standard();assertThat(assignments.get(incident.getId()).handler()).isNull();assertThat(assignments.assign(incident.getId(),alternate.getId(),0L,1L,"Explicit legacy triage").handler().id()).isEqualTo(alternate.getId());assertThat(assignments.history(incident.getId()).get(0).previousHandlerId()).isNull();
     }
     @Test void capabilityAndActorDeactivationAreRechecked(){
         standard();db.update("update assignment_admin_capabilities set active=0 where user_id=? and capability='ASSIGNMENT_ADMIN'",assigner.getId());assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"Revoked capability")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);

@@ -20,6 +20,26 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class IncidentAccessWiringTests {
+    private com.pareidolia.incidentmanagement.security.IncidentReadSnapshot snapshot() {
+        var snapshot = mock(com.pareidolia.incidentmanagement.security.IncidentReadSnapshot.class);
+        when(snapshot.read(any())).thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(0)).get());
+        when(snapshot.readForRollback(any())).thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(0)).get());
+        return snapshot;
+    }
+
+    @Test void unavailableClassificationNeverFallsBackToLegacyHints() {
+        var repo = mock(IncidentRepository.class);
+        var incident = new Incident();
+        incident.setId(2L);
+        incident.setIssueType(com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE);
+        when(repo.findSecurityClassifications(List.of(2L)))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("Synthetic unavailable classification"));
+        assertThatThrownBy(() -> com.pareidolia.incidentmanagement.security.IncidentConfidentiality
+                .persistedRestrictions(List.of(incident), repo))
+                .isInstanceOfSatisfying(org.springframework.web.server.ResponseStatusException.class,
+                        failure -> assertThat(failure.getStatusCode().value()).isEqualTo(503));
+    }
+
     @Test void deniedIncidentsAreFilteredFromListAndLegacyAssignment() {
         var repo=mock(IncidentRepository.class);var history=mock(IncidentHistoryRepository.class);var mapper=mock(IncidentMapper.class);var users=mock(AppUserService.class);
         var actor=new AppUser();actor.setRole(AppUserRole.ADMIN);actor.setEmail("admin@example.test");
@@ -28,6 +48,8 @@ class IncidentAccessWiringTests {
         var policy=mock(IncidentAccessPolicy.class);
         var service=new IncidentServiceImpl(repo,history,mapper,users,"owner@example.test",mock(ApplicationEventPublisher.class));
         ReflectionTestUtils.setField(service,"incidentAccessEnabled",true);ReflectionTestUtils.setField(service,"accessPolicy",policy);
+        ReflectionTestUtils.setField(service,"securityGate",mock(com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class));
+        ReflectionTestUtils.setField(service,"readSnapshot",snapshot());
         assertThat(service.getAllIncidents()).isEmpty();
         assertThatThrownBy(() -> service.assignIncident(2L,new com.pareidolia.incidentmanagement.dto.AssignIncidentRequestDto())).isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
         verify(repo,never()).saveAndFlush(any());
@@ -36,6 +58,7 @@ class IncidentAccessWiringTests {
         var incidentService=mock(IncidentService.class);var attachments=mock(IncidentAttachmentRepository.class);
         when(incidentService.getIncident(2L)).thenThrow(new AccessDeniedException("denied"));
         var service=new IncidentAttachmentServiceImpl(incidentService,mock(AppUserService.class),mock(IncidentRepository.class),attachments,mock(IncidentHistoryRepository.class));
+        ReflectionTestUtils.setField(service,"readSnapshot",snapshot());
         assertThatThrownBy(() -> service.content(2L,3L)).isInstanceOf(AccessDeniedException.class);
         verifyNoInteractions(attachments);
     }

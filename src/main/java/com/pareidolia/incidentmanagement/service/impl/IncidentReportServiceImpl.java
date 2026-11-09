@@ -14,7 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -35,9 +34,8 @@ public class IncidentReportServiceImpl implements IncidentReportService {
     @org.springframework.beans.factory.annotation.Autowired(required=false)
     private com.pareidolia.incidentmanagement.security.IncidentReadSnapshot readSnapshot;
     private <T> T secureRead(java.util.function.Supplier<T> work){
-        if(!incidentAccessEnabled)return work.get();
         if(readSnapshot==null)throw new IllegalStateException("Security snapshot unavailable.");
-        return readSnapshot.read(work);
+        return incidentAccessEnabled ? readSnapshot.read(work) : readSnapshot.readForRollback(work);
     }
     private record ReportRow(String number,Object[] values) { }
     private record HistoryRow(String number,Long id,Object[] values) { }
@@ -89,13 +87,11 @@ public class IncidentReportServiceImpl implements IncidentReportService {
             new Column("Updated At", Incident::getUpdatedAt));
 
     @Override
-    @Transactional(readOnly = true)
     public byte[] monthly(int year, int month) {
         return report(year, month, null, null, null, null);
     }
 
     @Override
-    @Transactional(readOnly = true)
     public byte[] report(Integer year, Integer month, LocalDate fromDate, LocalTime fromTime,
                          LocalDate toDate, LocalTime toTime) {
         var actor = users.getAuthenticatedUser();
@@ -162,7 +158,7 @@ public class IncidentReportServiceImpl implements IncidentReportService {
         if(incidentAccessEnabled && candidates.size()>10000)throw new InvalidRequestException("Narrow the report period to at most 10000 incidents.");
         var rows=incidentAccessEnabled?policy().filterRead(actor, candidates, com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.REPORT,
                 com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.ReadOperation.REPORT)
-                : candidates.stream().filter(incident -> !IncidentConfidentiality.requiresRestriction(incident, incidents)).toList();
+                : legacyReportRows(candidates);
         Map<String,String> names=new HashMap<>();
         if(!rows.isEmpty())appUsers.findByEmailIn(rows.stream().map(Incident::getReportedBy).distinct().toList()).forEach(u->names.put(u.getEmail().toLowerCase(Locale.ROOT),u.getDisplayName()));
         List<ReportRow> reportRows=new ArrayList<>();
@@ -175,6 +171,12 @@ public class IncidentReportServiceImpl implements IncidentReportService {
             String number=e.getIncident().getIncidentNumber();auditRows.add(new HistoryRow(number,e.getId(),new Object[]{number,e.getChangedAt(),e.getActionType(),e.getChangedBy(),e.getOldValue(),e.getNewValue(),e.getRemarks()}));}
         return new Snapshot(List.copyOf(reportRows),List.copyOf(auditRows));
     }
+    private List<Incident> legacyReportRows(List<Incident> candidates) {
+        var restricted = IncidentConfidentiality.persistedRestrictions(candidates, incidents);
+        return candidates.stream().filter(incident -> !restricted.contains(incident.getId())
+                && !IncidentConfidentiality.requiresRestriction(incident, incidents)).toList();
+    }
+
     private com.pareidolia.incidentmanagement.security.IncidentAccessPolicy policy(){if(accessPolicy==null)throw new IllegalStateException("Security policy unavailable.");return accessPolicy;}
     private static class ReportWriter {
         private final Workbook workbook;

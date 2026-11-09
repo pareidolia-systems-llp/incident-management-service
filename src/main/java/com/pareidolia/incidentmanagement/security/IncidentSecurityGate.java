@@ -25,17 +25,20 @@ public class IncidentSecurityGate {
         this.enabled = enabled;
     }
     private Object transaction(){return TransactionSynchronizationManager.getResource(em.getEntityManagerFactory());}
-    public boolean held(){return enabled && TransactionSynchronizationManager.isActualTransactionActive() && HELD.get().containsKey(transaction());}
+    public boolean held(){return TransactionSynchronizationManager.isActualTransactionActive() && HELD.get().containsKey(transaction());}
     public String sharedClause(){
         String product=em.unwrap(org.hibernate.Session.class).doReturningWork(c->c.getMetaData().getDatabaseProductName());
         if(product.equalsIgnoreCase("MySQL"))return " for share";
         if(product.equalsIgnoreCase("H2"))return " for update"; // H2 conservatively serializes readers in tests.
         throw new IllegalStateException("Incident security gate requires verified MySQL or isolated H2.");
     }
-    public void read(){acquire(false);}
-    public void write(){acquire(true);}
+    public void read(){if(enabled)acquire(false);}
+    public void write(){if(enabled)acquire(true);}
+
+    /** Legacy confidentiality checks must coordinate with guarded classification writers. */
+    void readForRollback(){acquire(false);}
+
     private void acquire(boolean write){
-        if(!enabled)return;
         if(!TransactionSynchronizationManager.isActualTransactionActive() || !TransactionSynchronizationManager.isSynchronizationActive() || TransactionSynchronizationManager.isCurrentTransactionReadOnly())
             throw new IllegalStateException("Security gate requires a read-write transaction.");
         Object key=transaction();if(key==null)throw new IllegalStateException("Missing JPA transaction.");

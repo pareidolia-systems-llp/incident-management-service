@@ -37,7 +37,12 @@ public class IncidentAccessPolicy {
     }
 
     public boolean useGlobalView(AppUser actor, java.util.List<Incident> incidents, ReadOperation operation) {
-        if (!hasGlobalView(actor)) return false;
+        if (!hasGlobalView(actor) || classifiedIncidents(incidents).size() != incidents.size()) return false;
+        auditGlobalView(actor, incidents, operation);
+        return true;
+    }
+
+    private void auditGlobalView(AppUser actor, java.util.List<Incident> incidents, ReadOperation operation) {
         // Write the audit in the same snapshot transaction. A failed audit fails the read.
         for (Incident incident : incidents) {
             if (em.createNativeQuery("""
@@ -48,12 +53,39 @@ public class IncidentAccessPolicy {
                 throw new IllegalStateException("Privileged incident access audit failed.");
             }
         }
-        return true;
     }
 
     public java.util.List<Incident> filterRead(AppUser actor, java.util.List<Incident> candidates,
             Permission permission, ReadOperation operation) {
-        return useGlobalView(actor, candidates, operation) ? candidates : filter(actor, candidates, permission);
+        if (!hasGlobalView(actor)) return filter(actor, candidates, permission);
+        var verified = classifiedIncidents(candidates);
+        auditGlobalView(actor, verified, operation);
+        return verified;
+    }
+
+    private java.util.List<Incident> classifiedIncidents(java.util.List<Incident> incidents) {
+        var verified = new java.util.ArrayList<Incident>();
+        for (int offset = 0; offset < incidents.size(); offset += 250) {
+            var batch = incidents.subList(offset, Math.min(offset + 250, incidents.size()));
+            var classifications = classifications(batch.stream().map(Incident::getId).toList());
+            batch.stream().filter(incident -> validClassification(classifications.get(incident.getId())))
+                    .forEach(verified::add);
+        }
+        return verified;
+    }
+
+    private java.util.Map<Long, String> classifications(java.util.List<Long> ids) {
+        var classifications = new java.util.HashMap<Long, String>();
+        @SuppressWarnings("unchecked") java.util.List<Object[]> rows = em.createNativeQuery(
+                "select incident_id,classification from incident_security_classification where incident_id in (:ids)")
+                .setParameter("ids", ids).getResultList();
+        for (var row : rows) classifications.put(((Number) row[0]).longValue(), String.valueOf(row[1]));
+        return classifications;
+    }
+
+    private static boolean validClassification(String classification) {
+        return "STANDARD".equals(classification) || "RESTRICTED".equals(classification)
+                || "UNCLASSIFIED".equals(classification);
     }
     private final EntityManager em;
     private final boolean enabled; private final IncidentSecurityGate securityGate;
@@ -81,9 +113,9 @@ public class IncidentAccessPolicy {
         if(!active(account[0]) || !(account[1] instanceof String email) || !email.equalsIgnoreCase(oidc.getEmail().trim())
                 || actor.getEmail()==null || !email.equalsIgnoreCase(actor.getEmail().trim()))return false;
         var classes=em.createNativeQuery("select classification from incident_security_classification where incident_id=?1"+suffix).setParameter(1,incident.getId()).getResultList();
-        if(classes.size()>1)return false;
-        String classification=classes.isEmpty()?"UNCLASSIFIED":String.valueOf(classes.get(0));
-        if(!java.util.Set.of("UNCLASSIFIED","STANDARD","RESTRICTED").contains(classification))return false;
+        if(classes.size()!=1)return false;
+        String classification=String.valueOf(classes.get(0));
+        if(!validClassification(classification))return false;
         boolean reporter=incident.getReportedBy()!=null && email.equalsIgnoreCase(incident.getReportedBy().trim());
         if(!classification.equals("RESTRICTED") && reporter && permission==Permission.VIEW)return true;
         if(permission==Permission.ASSIGN)return false; // Legacy free-text assignment must never bypass the new workflow.
@@ -108,12 +140,10 @@ public class IncidentAccessPolicy {
         var allowed=new java.util.HashSet<Long>();
         for(int offset=0;offset<candidates.size();offset+=250){
             var batch=candidates.subList(offset,Math.min(offset+250,candidates.size()));var ids=batch.stream().map(Incident::getId).toList();
-            var classifications=new java.util.HashMap<Long,String>();var grants=new java.util.HashMap<Long,java.util.Set<String>>();
-            @SuppressWarnings("unchecked") java.util.List<Object[]> classes=em.createNativeQuery("select incident_id,classification from incident_security_classification where incident_id in (:ids)").setParameter("ids",ids).getResultList();
-            for(var row:classes)classifications.put(((Number)row[0]).longValue(),String.valueOf(row[1]));
+            var classifications=classifications(ids);var grants=new java.util.HashMap<Long,java.util.Set<String>>();
             @SuppressWarnings("unchecked") java.util.List<Object[]> rows=em.createNativeQuery("select incident_id,permission from incident_security_grants where user_id=:user and active=1 and incident_id in (:ids)").setParameter("user",actor.getId()).setParameter("ids",ids).getResultList();
             for(var row:rows)grants.computeIfAbsent(((Number)row[0]).longValue(),id->new java.util.HashSet<>()).add(String.valueOf(row[1]));
-            for(var incident:batch){String classification=classifications.getOrDefault(incident.getId(),"UNCLASSIFIED");if(!java.util.Set.of("STANDARD","RESTRICTED","UNCLASSIFIED").contains(classification))continue;
+            for(var incident:batch){String classification=classifications.get(incident.getId());if(!validClassification(classification))continue;
                 boolean reporter=incident.getReportedBy()!=null && email.equalsIgnoreCase(incident.getReportedBy().trim());
                 var permissions=grants.getOrDefault(incident.getId(),java.util.Set.of());
                 if(permission!=Permission.ASSIGN && ((!classification.equals("RESTRICTED") && reporter && permission==Permission.VIEW) || permissions.contains("VIEW") && (permission==Permission.VIEW || permissions.contains(permission.name()))))allowed.add(incident.getId());

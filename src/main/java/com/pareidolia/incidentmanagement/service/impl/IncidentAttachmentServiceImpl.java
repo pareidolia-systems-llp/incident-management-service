@@ -33,9 +33,8 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
         if(securityGateEnabled){if(securityGate==null)throw new IllegalStateException("Security gate unavailable.");securityGate.write();}
     }
     private <T> T secureRead(java.util.function.Supplier<T> work){
-        if(!securityGateEnabled)return work.get();
         if(readSnapshot==null)throw new IllegalStateException("Security snapshot unavailable.");
-        return readSnapshot.read(work);
+        return incidentAccessEnabled ? readSnapshot.read(work) : readSnapshot.readForRollback(work);
     }
     private static final int MAX_BYTES = 5 * 1024 * 1024;
     private static final long MAX_PIXELS = 20_000_000;
@@ -49,7 +48,6 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
     private final IncidentHistoryRepository history;
 
     @Override
-    @Transactional(readOnly = true)
     public List<IncidentAttachmentResponseDto> list(Long incidentId) {
         return secureRead(() -> {
         if (incidentAccessEnabled) incidentService.checkAttachmentRead(incidentId, false);
@@ -60,7 +58,6 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
     }
 
     @Override
-    @Transactional(readOnly = true)
     public AttachmentContentDto content(Long incidentId, Long attachmentId) {
         return secureRead(() -> {
         if (incidentAccessEnabled) incidentService.checkAttachmentRead(incidentId, true);
@@ -83,6 +80,10 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
         Incident incident = incidentAccessEnabled
                 ? incidents.findById(incidentId).orElseThrow(() -> new IncidentNotFoundException("Incident not found."))
                 : incidents.getReferenceById(incidentId);
+        if (!incidentAccessEnabled && com.pareidolia.incidentmanagement.security.IncidentConfidentiality
+                .persistedRestrictions(List.of(incident), incidents).contains(incidentId)) {
+            throw new IncidentNotFoundException("Incident not found.");
+        }
         if (incidentAccessEnabled && actor.getRole() == AppUserRole.REPORTER
                 && !com.pareidolia.incidentmanagement.security.IncidentConfidentiality.isReporter(actor, incident)) {
             throw new IncidentNotFoundException("Incident not found.");

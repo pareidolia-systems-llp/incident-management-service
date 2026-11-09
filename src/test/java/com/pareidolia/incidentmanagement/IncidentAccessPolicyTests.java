@@ -25,6 +25,8 @@ class IncidentAccessPolicyTests {
         if(db.queryForObject("select count(*) from incident_security_lock",Long.class)==0)db.update("insert into incident_security_lock values(1)");
         db.execute("create table if not exists incident_security_classification(incident_id bigint primary key, classification varchar(20))");
         db.execute("create table if not exists incident_security_grants(incident_id bigint,user_id bigint,permission varchar(20),active tinyint,primary key(incident_id,user_id,permission))");
+        db.execute("create table if not exists assignment_admin_capabilities(user_id bigint, capability varchar(40), active tinyint)");
+        db.execute("create table if not exists incident_global_view_audit(actor_user_id bigint, incident_id bigint, operation varchar(40))");
         db.update("delete from incident_security_grants");db.update("delete from incident_security_classification");
         user=new AppUser();user.setEmail("reporter@example.test");user.setDisplayName("Reporter");user=users.saveAndFlush(user);
         incident=new Incident();incident.setId(123L);incident.setReportedBy(user.getEmail());
@@ -33,7 +35,25 @@ class IncidentAccessPolicyTests {
         enabled=new IncidentAccessPolicy(em,true);
     }
     @AfterEach void clear(){SecurityContextHolder.clearContext();}
+    @Test void absentClassificationDeniesEvenReporterAndExplicitCaseGrant(){
+        db.update("insert into incident_security_grants values(123,?,'VIEW',1)",user.getId());
+        assertThat(enabled.can(user,incident,IncidentAccessPolicy.Permission.VIEW)).isFalse();
+        assertThat(enabled.filter(user,java.util.List.of(incident),IncidentAccessPolicy.Permission.VIEW)).isEmpty();
+    }
+    @Test void auditedGlobalViewSkipsCasesWithMissingClassification(){
+        db.update("insert into assignment_admin_capabilities values(?,'GLOBAL_INCIDENT_VIEW',1)",user.getId());
+        var classified = new Incident();
+        classified.setId(124L);
+        db.update("insert into incident_security_classification values(124,'RESTRICTED')");
+        enabled.can(user,incident,IncidentAccessPolicy.Permission.VIEW);
+        assertThat(enabled.useGlobalView(user,java.util.List.of(incident),IncidentAccessPolicy.ReadOperation.DETAIL)).isFalse();
+        assertThat(enabled.filterRead(user,java.util.List.of(incident,classified),
+                IncidentAccessPolicy.Permission.VIEW,IncidentAccessPolicy.ReadOperation.LIST)).containsExactly(classified);
+        assertThat(db.queryForList("select incident_id from incident_global_view_audit where actor_user_id=?",Long.class,user.getId()))
+                .containsExactly(124L);
+    }
     @Test void unclassifiedReporterCanViewButNotModifyAndMissingGrantsDeny(){
+        db.update("insert into incident_security_classification values(123,'UNCLASSIFIED')");
         assertThat(enabled.can(user,incident,IncidentAccessPolicy.Permission.VIEW)).isTrue();
         assertThat(enabled.can(user,incident,IncidentAccessPolicy.Permission.MODIFY)).isFalse();
         incident.setReportedBy("someone@example.test");assertThat(enabled.can(user,incident,IncidentAccessPolicy.Permission.VIEW)).isFalse();

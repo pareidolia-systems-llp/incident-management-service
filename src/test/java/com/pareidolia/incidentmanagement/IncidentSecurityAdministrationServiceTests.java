@@ -70,6 +70,7 @@ class IncidentSecurityAdministrationServiceTests {
         assertThat(db.queryForObject("select count(*) from incident_security_grants where incident_id=?",Long.class,incident.getId())).isZero();
     }
     @Test void revocationWaitsForAnInFlightAuthorizedMutation() throws Exception {
+        service.classify(incident.getId(),"STANDARD",0L,"Classified before access");
         service.setGrant(incident.getId(),target.getId(),"VIEW",true,0L,"Granted");
         service.setGrant(incident.getId(),target.getId(),"MODIFY",true,0L,"Granted");
         var pool=java.util.concurrent.Executors.newFixedThreadPool(2);

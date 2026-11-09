@@ -7,6 +7,9 @@ import com.pareidolia.incidentmanagement.enums.*;
 import com.pareidolia.incidentmanagement.exception.*;
 import com.pareidolia.incidentmanagement.mapper.IncidentMapper;
 import com.pareidolia.incidentmanagement.repository.*;
+import com.pareidolia.incidentmanagement.security.IncidentReadSnapshot;
+import com.pareidolia.incidentmanagement.security.IncidentSecurityGate;
+import org.springframework.test.context.jdbc.Sql;
 import com.pareidolia.incidentmanagement.service.*;
 import com.pareidolia.incidentmanagement.service.impl.*;
 import jakarta.persistence.EntityManager;
@@ -36,7 +39,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @DataJpaTest(properties = "spring.jpa.properties.hibernate.session_factory.statement_inspector=com.pareidolia.incidentmanagement.IncidentFeatureTests$SqlCapture")
-@Import({IncidentServiceImpl.class, IncidentMapper.class, IncidentAttachmentServiceImpl.class, IncidentReportServiceImpl.class})
+@Import({IncidentServiceImpl.class, IncidentMapper.class, IncidentAttachmentServiceImpl.class, IncidentReportServiceImpl.class,
+        IncidentSecurityGate.class, IncidentReadSnapshot.class})
+@Sql(scripts = "/rollback-confidentiality-schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_CLASS)
 class IncidentFeatureTests {
     @Autowired IncidentRepository incidents;
     @Autowired IncidentHistoryRepository history;
@@ -46,6 +51,7 @@ class IncidentFeatureTests {
     @Autowired IncidentService incidentService;
     @Autowired AppUserRepository appUsers;
     @Autowired EntityManager entityManager;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate db;
     @MockitoBean AppUserService users;
     MockMvc mvc;
 
@@ -73,6 +79,104 @@ class IncidentFeatureTests {
         incident.setIssueType(IssueType.IT_ISSUE); incident.setSeverity(Severity.LOW); incident.setPriority(Priority.LOW);
         incident.setStatus(IncidentStatus.ASSIGNED);
         return incidents.saveAndFlush(incident);
+    }
+
+    @Test
+    void persistedRestrictedCaseStaysHiddenFromLegacyAdminAndBothExportSheets() throws Exception {
+        Incident restricted = incident("INC-RESTRICTED", "2026-10-05T12:00:00");
+        Incident ordinary = incident("INC-STANDARD", "2026-10-05T12:00:00");
+        var attachment = attachmentService.upload(restricted.getId(), List.of(image("png"))).get(0);
+        for (Incident ticket : List.of(restricted, ordinary)) {
+            var event = new IncidentHistory();
+            event.setIncident(ticket);
+            event.setActionType(HistoryActionType.WORK_NOTE);
+            event.setChangedBy("owner@pareidolia.in");
+            event.setChangedAt(LocalDateTime.parse("2026-10-05T13:00:00"));
+            history.saveAndFlush(event);
+        }
+        db.update("insert into incident_security_classification values (?, 'RESTRICTED', 1)", restricted.getId());
+        db.update("insert into incident_security_classification values (?, 'STANDARD', 1)", ordinary.getId());
+        var admin = new AppUser();
+        admin.setId(123L);
+        admin.setRole(AppUserRole.ADMIN);
+        admin.setEmail("admin@example.test");
+        when(users.getAuthenticatedUser()).thenReturn(admin);
+        db.update("insert into assignment_admin_capabilities values (?, 'GLOBAL_INCIDENT_VIEW', 1)", admin.getId());
+
+        mvc.perform(get("/api/incidents")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].incidentNumber").value("INC-STANDARD"));
+        mvc.perform(get("/api/incidents").param("page", "0").param("size", "10")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].incidentNumber").value("INC-STANDARD"));
+        for (String url : List.of("/api/incidents/" + restricted.getId(),
+                "/api/incidents/number/" + restricted.getIncidentNumber(),
+                "/api/incidents/" + restricted.getId() + "/history",
+                "/api/incidents/" + restricted.getId() + "/attachments",
+                "/api/incidents/" + restricted.getId() + "/attachments/" + attachment.id())) {
+            mvc.perform(get(url)).andExpect(status().isNotFound());
+        }
+        var export = mvc.perform(get("/api/reports/incidents/monthly").param("year", "2026").param("month", "10"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        try (var workbook = new XSSFWorkbook(new ByteArrayInputStream(export))) {
+            for (String name : List.of("Incidents", "Lifecycle History")) {
+                var sheet = workbook.getSheet(name);
+                assertThat(sheet.getPhysicalNumberOfRows()).isEqualTo(2);
+                assertThat(sheet.getRow(1).getCell(0).getStringCellValue()).isEqualTo("INC-STANDARD");
+            }
+        }
+    }
+
+    @Test
+    void restrictedOriginalReporterNeedsVerifiedIdentityAndCaseViewForLifecycle() throws Exception {
+        Incident restricted = incident("INC-REPORTER-RESTRICTED", "2026-10-05T12:00:00");
+        restricted.setStatus(IncidentStatus.RESOLVED);
+        incidents.saveAndFlush(restricted);
+        db.update("insert into incident_security_classification values (?, 'RESTRICTED', 1)", restricted.getId());
+        var actor = new AppUser();
+        actor.setId(124L);
+        actor.setRole(AppUserRole.REPORTER);
+        actor.setEmail(restricted.getReportedBy());
+        when(users.getAuthenticatedUser()).thenReturn(actor);
+        var oidc = org.mockito.Mockito.mock(org.springframework.security.oauth2.core.oidc.user.OidcUser.class);
+        when(oidc.getEmail()).thenReturn(actor.getEmail());
+        when(oidc.getEmailVerified()).thenReturn(true);
+        org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(
+                new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(oidc, "", List.of()));
+        try {
+            String path = "/api/incidents/" + restricted.getId();
+            mvc.perform(get(path)).andExpect(status().isNotFound());
+            mvc.perform(post(path + "/validate").contentType("application/json")
+                    .content("{\"validationDetails\":\"Verified\"}")).andExpect(status().isNotFound());
+
+            db.update("insert into incident_security_grants values (?, ?, 'VIEW', 1)", restricted.getId(), actor.getId());
+            when(oidc.getEmailVerified()).thenReturn(false);
+            mvc.perform(get(path)).andExpect(status().isNotFound());
+            when(oidc.getEmailVerified()).thenReturn(true);
+            mvc.perform(get(path)).andExpect(status().isOk());
+            mvc.perform(multipart(path + "/attachments").file(image("png"))).andExpect(status().isNotFound());
+            mvc.perform(post(path + "/validate").contentType("application/json")
+                    .content("{\"validationDetails\":\"Verified\"}")).andExpect(status().isOk());
+            mvc.perform(post(path + "/close").contentType("application/json")
+                    .content("{\"remarks\":\"Confirmed closure\"}")).andExpect(status().isOk());
+
+            db.update("update incident_security_grants set active = 0 where incident_id = ?", restricted.getId());
+            mvc.perform(get(path)).andExpect(status().isNotFound());
+        } finally {
+            org.springframework.security.core.context.SecurityContextHolder.clearContext();
+        }
+    }
+
+    @Test
+    void unverifiableClassificationFailsClosedForLegacyReadsAndExport() throws Exception {
+        Incident ticket = incident("INC-UNVERIFIABLE", "2026-10-05T12:00:00");
+        db.update("insert into incident_security_classification values (?, 'RESTRICTED', 0)", ticket.getId());
+        for (String url : List.of("/api/incidents", "/api/incidents/" + ticket.getId(),
+                "/api/incidents/" + ticket.getId() + "/attachments")) {
+            mvc.perform(get(url)).andExpect(status().isServiceUnavailable());
+        }
+        mvc.perform(get("/api/reports/incidents/monthly").param("year", "2026").param("month", "10"))
+                .andExpect(status().isServiceUnavailable());
     }
 
     MockMultipartFile image(String format) throws IOException {

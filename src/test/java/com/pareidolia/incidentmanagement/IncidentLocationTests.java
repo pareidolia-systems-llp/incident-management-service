@@ -12,6 +12,9 @@ import com.pareidolia.incidentmanagement.service.IncidentService;
 import com.pareidolia.incidentmanagement.service.impl.IncidentServiceImpl;
 import com.pareidolia.incidentmanagement.enums.IncidentStatus;
 import jakarta.persistence.EntityManager;
+import com.pareidolia.incidentmanagement.security.IncidentReadSnapshot;
+import com.pareidolia.incidentmanagement.security.IncidentSecurityGate;
+import org.springframework.test.context.jdbc.Sql;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -39,7 +42,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 // Isolated H2 persistence and real MVC validation/service/mapping; no production database or login.
 @DataJpaTest
-@Import({IncidentServiceImpl.class, IncidentMapper.class})
+@Import({IncidentServiceImpl.class, IncidentMapper.class, IncidentSecurityGate.class, IncidentReadSnapshot.class})
+@Sql(scripts = "/rollback-confidentiality-schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_CLASS)
 class IncidentLocationTests {
     @Autowired IncidentService service;
     @Autowired IncidentRepository repository;
@@ -612,6 +616,10 @@ class IncidentLocationTests {
                 "owner@example.test",
                 mock(org.springframework.context.ApplicationEventPublisher.class)
         );
+        var snapshot = mock(IncidentReadSnapshot.class);
+        when(snapshot.readForRollback(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(0)).get());
+        org.springframework.test.util.ReflectionTestUtils.setField(isolatedService, "readSnapshot", snapshot);
         MockMvc isolatedMvc = MockMvcBuilders.standaloneSetup(new IncidentController(isolatedService))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
         authenticateAs("reporter@example.test", AppUserRole.REPORTER);

@@ -42,6 +42,16 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
     List<Incident> findByReportedAtGreaterThanEqualAndReportedAtLessThanOrderByReportedAtAscIdAsc(
             java.time.LocalDateTime start, java.time.LocalDateTime end);
 
+    @Query(value = "select incident_id, classification, version from incident_security_classification where incident_id in (:ids)",
+            nativeQuery = true)
+    List<Object[]> findSecurityClassifications(@Param("ids") java.util.Collection<Long> ids);
+
+    @Query(value = """
+            select count(*) from incident_security_grants
+            where incident_id = :incident and user_id = :user and permission = 'VIEW' and active = 1
+            """, nativeQuery = true)
+    long countActiveCaseViewGrants(@Param("incident") Long incidentId, @Param("user") Long userId);
+
     Optional<Incident> findByIncidentNumber(String incidentNumber);
 
     List<Incident> findByReportedByIgnoreCaseOrderByCreatedAtDescIdDesc(String reportedBy);
