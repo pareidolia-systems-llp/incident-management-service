@@ -593,16 +593,29 @@ public class IncidentServiceImpl implements IncidentService {
         });
     }
 
+
     private String generateIncidentNumber() {
         String incidentNumber;
+
         do {
             LocalDateTime now = LocalDateTime.now();
-            String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase(Locale.ROOT);
-            incidentNumber = "INC-" + INCIDENT_YEAR_FORMAT.format(now) + "-"
-                    + INCIDENT_TIMESTAMP_FORMAT.format(now) + "-" + suffix;
+
+            String suffix = UUID.randomUUID()
+                    .toString()
+                    .replace("-", "")
+                    .substring(0, 8)
+                    .toUpperCase(Locale.ROOT);
+
+            incidentNumber = "INC-"
+                    + INCIDENT_TIMESTAMP_FORMAT.format(now)
+                    + "-"
+                    + suffix;
+
         } while (incidentRepository.findByIncidentNumber(incidentNumber).isPresent());
+
         return incidentNumber;
     }
+
 
     private void ensureNotClosed(Incident incident, String operation) {
         if (incident.getStatus() == IncidentStatus.CLOSED) {
