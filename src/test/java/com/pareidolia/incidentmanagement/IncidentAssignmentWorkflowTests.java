@@ -97,6 +97,37 @@ class IncidentAssignmentWorkflowTests {
     void conflict(Runnable work){assertThatThrownBy(work::run).isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));}
 
     @Test
+    void guardedScreenshotUploadRequiresCaseGrantsAndReporterOwnership() throws Exception {
+        var mvc = MockMvcBuilders.standaloneSetup(
+                new com.pareidolia.incidentmanagement.controller.IncidentAttachmentController(attachments))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
+        var png = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(2, 2, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", png);
+        var screenshot = new org.springframework.mock.web.MockMultipartFile("files", "synthetic.png", "image/png", png.toByteArray());
+        String path = "/api/incidents/" + incident.getId() + "/attachments";
+
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart(path).file(screenshot))
+                .andExpect(status().isNotFound());
+        login(classifier);
+        administration.classify(incident.getId(), "STANDARD", 0L, "Synthetic screenshot fixture");
+        for (var permission : List.of("VIEW", "MODIFY")) {
+            administration.setGrant(incident.getId(), reporter.getId(), permission, true, 0L, "Approved fixture upload");
+            administration.setGrant(incident.getId(), membershipAdmin.getId(), permission, true, 0L, "Synthetic ownership denial");
+        }
+        login(membershipAdmin);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart(path).file(screenshot))
+                .andExpect(status().isNotFound());
+        login(reporter);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart(path).file(screenshot))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$[0].originalFilename").value("synthetic.png"));
+        var metadata = attachments.list(incident.getId());
+        assertThat(metadata).hasSize(1);
+        assertThat(attachments.content(incident.getId(), metadata.get(0).id()).data()).isEqualTo(png.toByteArray());
+        assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(incident.getId()))
+                .extracting(IncidentHistory::getActionType).containsExactly(HistoryActionType.INCIDENT_CREATED, HistoryActionType.ATTACHMENT_ADDED);
+    }
+
+    @Test
     void hrReferralIntakeReturnsTheSameEmptyResponseWithoutCaseAccess() throws Exception {
         AppUser requester = prepareHrReferral();
         var mvc = MockMvcBuilders.standaloneSetup(
