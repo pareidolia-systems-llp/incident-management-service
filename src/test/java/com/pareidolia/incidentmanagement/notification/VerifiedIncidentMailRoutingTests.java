@@ -84,6 +84,62 @@ class VerifiedIncidentMailRoutingTests {
         assertThat(routing.recipients(number)).isEmpty();
     }
 
+    @Test void restrictedDepartmentHeadNeedsDesignationVerifiedLoginAndCaseGrant() {
+        incident.setIssueType(IssueType.HR_ISSUE);
+        incident.setResponsibleDepartmentId(2L);
+        classification("RESTRICTED");
+        env.setProperty(PREFIX + "department-head-notifications.enabled", "true");
+        env.setProperty(PREFIX + "department-head-recipients", "2=head@example.test");
+        env.setProperty(PREFIX + "restricted-recipients", "2=head@example.test");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        account(22L, "head@example.test", 2L, false);
+        AppUser head = accounts.findByEmail("head@example.test").orElseThrow();
+        when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(2L), eq(22L))).thenReturn(1);
+        when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(1L);
+        assertThat(routing.recipients(number)).isEmpty();
+        head.setLastLoginAt(java.time.LocalDateTime.now());
+        assertThat(routing.recipients(number)).containsExactly("head@example.test");
+        when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(0L);
+        assertThat(routing.recipients(number)).isEmpty();
+        when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(1L);
+        when(policy.allowsHrOperations(head, incident)).thenReturn(false);
+        assertThat(routing.recipients(number)).isEmpty();
+    }
+
+    @Test void referralMailIsMinimalAndRecordsTransportFailure() {
+        @SuppressWarnings("unchecked") ObjectProvider<JavaMailSender> provider = mock(ObjectProvider.class);
+        var sender = mock(JavaMailSender.class);
+        when(provider.getIfUnique()).thenReturn(sender);
+        var service = mock(com.pareidolia.incidentmanagement.service.HrReassignmentReferralService.class);
+        var id = java.util.UUID.randomUUID();
+        var allowed = java.util.Set.of("hr@example.test");
+        when(service.notificationReviewerIds()).thenReturn(java.util.Set.of(12L));
+        when(service.claimNotice(id, 12L, allowed)).thenReturn("hr@example.test", null);
+        doThrow(new org.springframework.mail.MailSendException("Synthetic SMTP failure"))
+                .when(sender).send(any(org.springframework.mail.SimpleMailMessage.class));
+        env.setActiveProfiles("dev");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        env.setProperty("app.notifications.email.enabled", "true");
+        var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test", "", "", "hr@example.test");
+        var notifier = new IncidentEmailNotifications(settings, env, provider, Runnable::run,
+                new IncidentEmailDetailPolicy(env, java.util.stream.Stream::empty), routing);
+        notifier.hrReferrals(service);
+        var event = new com.pareidolia.incidentmanagement.service.HrReassignmentReferralService.HrReferralQueued(id);
+        notifier.hrReferralQueued(event);
+        verifyNoInteractions(sender, service);
+        env.setProperty("app.notifications.email.hr-referrals.enabled", "true");
+        notifier.hrReferralQueued(event);
+        notifier.hrReferralQueued(event);
+        var sent = org.mockito.ArgumentCaptor.forClass(org.springframework.mail.SimpleMailMessage.class);
+        verify(sender).send(sent.capture());
+        assertThat(sent.getValue().getTo()).containsExactly("hr@example.test");
+        assertThat(sent.getValue().getText()).isEqualTo("A review is pending. Sign in to the portal: https://portal.example.test/"
+                + "\nReview reference: " + id);
+        verify(service).recordNoticeResult(id, 12L, false);
+    }
+
     @Test void queuedMailUsesCurrentMembershipAndCapturedContentIsMinimal() throws Exception {
         incident.setResponsibleDepartmentId(3L);
         var queue = new ArrayDeque<Runnable>();

@@ -73,6 +73,29 @@ public class IncidentAssignmentService {
         if(!active(row[0]) || !AppUserService.normalizeEmail((String)row[1]).equals(AppUserService.normalizeEmail(oidc.getEmail())))throw denied();return actor;
     }
     private boolean capability(AppUser actor,String cap){var rows=em.createNativeQuery("select active from assignment_admin_capabilities where user_id=?1 and capability=?2").setParameter(1,actor.getId()).setParameter(2,cap).getResultList();return rows.size()==1 && active(rows.get(0));}
+
+    AppUser referralCoordinator() {
+        AppUser coordinator = actor();
+        if (!capability(coordinator, "ASSIGNMENT_ADMIN")) throw denied();
+        return coordinator;
+    }
+
+    State hrReferralCase(AppUser reviewer, Incident incident) {
+        if (!canReviewHrReferral(reviewer, incident)) return null;
+        State current = state(reviewer, incident);
+        return current.canAssign() && current.handler() != null ? current : null;
+    }
+
+    boolean canReviewHrReferral(AppUser reviewer, Incident incident) {
+        Long id = incident.getId();
+        Long departmentId = incident.getResponsibleDepartmentId();
+        String department = departmentId == null ? null : incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null);
+        var trust = classification(id);
+        return policy.hasHrAccountScope(reviewer) && incident.getStatus() != IncidentStatus.CLOSED && department != null
+                && "RESTRICTED".equals(trust[0]) && number(trust[1]) > 0 && policy.isHrCase(incident, department)
+                && capability(reviewer, "ASSIGNMENT_ADMIN")
+                && grant(id, reviewer.getId(), "VIEW") && grant(id, reviewer.getId(), "ASSIGN");
+    }
     private Incident incident(Long id){if(id==null || id<=0)throw missing();return incidents.findById(id).orElseThrow(IncidentAssignmentService::missing);}
     private boolean canView(AppUser actor,Incident incident){
         return !(actor.getRole()==AppUserRole.REPORTER && !actor.getEmail().equalsIgnoreCase(incident.getReportedBy()))
@@ -83,19 +106,43 @@ public class IncidentAssignmentService {
     private Incident lockedIncident(Long id){if(id==null || id<=0 || em.createNativeQuery("select id from incidents where id=?1 for update").setParameter(1,id).getResultList().size()!=1)throw missing();var incident=incident(id);em.refresh(incident,jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);return incident;}
     private Object[] classification(Long id){var rows=em.createNativeQuery("select classification,version from incident_security_classification where incident_id=?1").setParameter(1,id).getResultList();return rows.isEmpty()?new Object[]{"UNCLASSIFIED",0L}:(Object[])rows.get(0);}
     private boolean grant(Long incident,Long user,String permission){var rows=em.createNativeQuery("select active from incident_security_grants where incident_id=?1 and user_id=?2 and permission=?3").setParameter(1,incident).setParameter(2,user).setParameter(3,permission).getResultList();return rows.size()==1 && active(rows.get(0));}
-    private boolean assignable(AppUser actor,Incident incident,String classification){return policy.allowsHrOperations(actor, incident) && directory.activeDepartment(incident.getResponsibleDepartmentId())
-            && (!IncidentConfidentiality.requiresRestriction(incident, incidents) || classification.equals("RESTRICTED"))
-            && Set.of("STANDARD","RESTRICTED").contains(classification) && incident.getStatus()!=IncidentStatus.CLOSED && capability(actor,"ASSIGNMENT_ADMIN") && canView(actor,incident) && (!classification.equals("RESTRICTED") || grant(incident.getId(),actor.getId(),"ASSIGN"));}
-    private boolean handlerAllowed(AppUser actor, Incident incident, Employee handler) {
-        return handlerAllowed(actor, incident.getId(), incident.getResponsibleDepartmentId(), handler);
+    private boolean assignable(AppUser actor, Incident incident, String classification) {
+        Long departmentId = incident.getResponsibleDepartmentId();
+        String department = departmentId == null ? null : incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null);
+        boolean itService = allowsItService(incident, classification, department);
+        return policy.allowsHrOperations(actor, incident)
+                && (departmentId == null ? itService : department != null)
+                && (itService || !IncidentConfidentiality.requiresRestriction(incident, department) || classification.equals("RESTRICTED"))
+                && Set.of("STANDARD", "RESTRICTED").contains(classification) && incident.getStatus() != IncidentStatus.CLOSED
+                && capability(actor, "ASSIGNMENT_ADMIN") && canView(actor, incident)
+                && (!classification.equals("RESTRICTED") || grant(incident.getId(), actor.getId(), "ASSIGN"));
     }
+
+    private boolean allowsItService(Incident incident, String classification, String department) {
+        return "STANDARD".equals(classification) && !policy.isHrDepartment(incident.getResponsibleDepartmentId(), department)
+                && IncidentConfidentiality.isOrdinaryItService(incident, department);
+    }
+
+    private boolean handlerAllowed(AppUser actor, Incident incident, Employee handler, String classification) {
+        Long departmentId = incident.getResponsibleDepartmentId();
+        String department = departmentId == null ? null : incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null);
+        return handlerAllowed(actor, incident, departmentId, department, handler, allowsItService(incident, classification, department));
+    }
+
     private boolean handlerAllowed(AppUser actor, Long incidentId, Long departmentId, Employee handler) {
+        String department = incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null);
+        return handlerAllowed(actor, incident(incidentId), departmentId, department, handler, false);
+    }
+
+    private boolean handlerAllowed(AppUser actor, Incident incident, Long departmentId, String department,
+                                   Employee handler, boolean allowItService) {
         AppUser handlerAccount = em.find(AppUser.class, handler.id());
-        return policy.allowsHrOperations(handlerAccount, incident(incidentId))
-                && policy.allowsHrDestination(handlerAccount, departmentId, incidents.findActiveResponsibleDepartmentName(departmentId).orElse(null))
-                && directory.activeMember(departmentId, handler.id())
+        return policy.allowsHrOperations(handlerAccount, incident)
+                && (departmentId == null || policy.allowsHrDestination(handlerAccount, departmentId, department))
+                && ((allowItService && handlerAccount.getRole() == AppUserRole.IT_HANDLER)
+                    || directory.activeMember(departmentId, handler.id()))
                 && allowedPairs.contains(actor.getId()+":"+handler.id())
-                && grant(incidentId,handler.id(),"VIEW") && grant(incidentId,handler.id(),"HANDLE");
+                && grant(incident.getId(),handler.id(),"VIEW") && grant(incident.getId(),handler.id(),"HANDLE");
     }
     private State state(AppUser actor,Incident incident){
         Object[] c=classification(incident.getId());var rows=em.createNativeQuery("select handler_user_id,proposed_handler_user_id,assignment_version from incident_assignment_state where incident_id=?1").setParameter(1,incident.getId()).getResultList();
@@ -106,7 +153,7 @@ public class IncidentAssignmentService {
     public List<Employee> search(String search,Long incidentId){return snapshot.read(()->{
         var actor=actor();if(incidentId==null){if(!Set.of(AppUserRole.REPORTER,AppUserRole.ADMIN).contains(actor.getRole()))throw denied();return directory.search(search).stream().limit(10).toList();}
         var incident=incident(incidentId);view(actor,incident);String c=(String)classification(incidentId)[0];if(!assignable(actor,incident,c))throw denied();
-        return directory.search(search).stream().filter(e->handlerAllowed(actor,incident,e)).limit(10).toList();
+        return directory.search(search).stream().filter(e->handlerAllowed(actor,incident,e,c)).limit(10).toList();
     });}
     @Transactional(readOnly=true)
     public State get(Long id){return snapshot.read(()->{var actor=actor();var incident=incident(id);
@@ -152,10 +199,11 @@ public class IncidentAssignmentService {
         var capabilities=capability(actor,"ASSIGNMENT_ADMIN")?Set.of(com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.Capability.ASSIGNMENT_ADMIN):Set.<com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.Capability>of();
         var actorPermissions=grant(id,actor.getId(),"ASSIGN")?Set.of(com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.CasePermission.ASSIGN):Set.<com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.CasePermission>of();
         var handlerPermissions=grant(id,handlerId,"HANDLE")?Set.of(com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.CasePermission.HANDLE):Set.<com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.CasePermission>of();
-        if(!handlerAllowed(actor,incident,handler) || !com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.canAssign(true,capabilities,
+        if(!handlerAllowed(actor,incident,handler,(String)c[0]) || !com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.canAssign(true,capabilities,
                 com.pareidolia.incidentmanagement.assignment.AssignmentAuthorizationPolicy.Classification.valueOf((String)c[0]),true,true,allowedPairs.contains(actor.getId()+":"+handlerId),actorPermissions,handlerPermissions,true))throw denied();
         var rows=em.createNativeQuery("select handler_user_id,assignment_version from incident_assignment_state where incident_id=?1 for update").setParameter(1,id).getResultList();Long previous=null;long version=0;
         if(!rows.isEmpty()){Object[] r=(Object[])rows.get(0);previous=nullable(r[0]);version=number(r[1]);}if(version!=expectedVersion)throw conflict();if(Objects.equals(previous,handlerId))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Select a different handler.");
+        if (previous != null) requireReconciledReassignment(incident, previous);
         long next=Math.addExact(version,1);if(rows.isEmpty())em.createNativeQuery("insert into incident_assignment_state(incident_id,handler_user_id,assignment_version) values (?1,?2,?3)").setParameter(1,id).setParameter(2,handlerId).setParameter(3,next).executeUpdate();
         else if(em.createNativeQuery("update incident_assignment_state set handler_user_id=?2,assignment_version=?3 where incident_id=?1 and assignment_version=?4").setParameter(1,id).setParameter(2,handlerId).setParameter(3,next).setParameter(4,version).executeUpdate()!=1)throw conflict();
         if(em.createNativeQuery("insert into incident_assignment_audit(incident_id,actor_user_id,previous_handler_user_id,new_handler_user_id,assignment_version,action_type,reason) values (?1,?2,?3,?4,?5,?6,?7)").setParameter(1,id).setParameter(2,actor.getId()).setParameter(3,previous).setParameter(4,handlerId).setParameter(5,next).setParameter(6,previous==null?"INITIAL":"REASSIGN").setParameter(7,reason.trim()).executeUpdate()!=1)throw new IllegalStateException("Assignment audit failed.");
@@ -532,23 +580,41 @@ public class IncidentAssignmentService {
         }
     }
 
-    private void requireReconciledHandoff(AppUser actor, Incident incident, Long previousHandler, Long destinationHandler, Long reviewingUser) {
+    private List<Object[]> activeCaseGrants(Incident incident) {
         @SuppressWarnings("unchecked")
         List<Object[]> grants = em.createNativeQuery("""
                 select g.user_id, u.email, g.permission
                 from incident_security_grants g join app_users u on u.id = g.user_id
                 where g.incident_id = :id and g.active = 1
                 """).setParameter("id", incident.getId()).getResultList();
+        return grants;
+    }
+
+    private void requireReconciledReassignment(Incident incident, long previousHandler) {
         String reporter = AppUserService.normalizeEmail(incident.getReportedBy());
-        for (Object[] row : grants) {
+        for (Object[] grant : activeCaseGrants(incident)) {
+            // Case grants have no purpose field. Only reporter VIEW has a provable independent basis here.
+            if (number(grant[0]) == previousHandler && !isReporterView(reporter, grant)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Case access requires independent handoff review.");
+            }
+        }
+    }
+
+    private boolean isReporterView(String reporter, Object[] grant) {
+        return "VIEW".equals(grant[2]) && !reporter.isEmpty()
+                && reporter.equals(AppUserService.normalizeEmail((String) grant[1]));
+    }
+
+    private void requireReconciledHandoff(AppUser actor, Incident incident, Long previousHandler, Long destinationHandler, Long reviewingUser) {
+        String reporter = AppUserService.normalizeEmail(incident.getReportedBy());
+        for (Object[] row : activeCaseGrants(incident)) {
             long userId = number(row[0]);
             String permission = (String) row[2];
             boolean formerHandler = Objects.equals(previousHandler, userId) && userId != destinationHandler;
             boolean approved = (Objects.equals(reviewingUser, userId) && "VIEW".equals(permission))
                     || (userId == actor.getId() && Set.of("VIEW", "ASSIGN").contains(permission))
                     || (userId == destinationHandler && Set.of("VIEW", "HANDLE").contains(permission))
-                    || (!reporter.isEmpty() && reporter.equals(AppUserService.normalizeEmail((String) row[1]))
-                        && "VIEW".equals(permission));
+                    || isReporterView(reporter, row);
             if (formerHandler || !approved) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "Case access requires independent handoff review.");
             }

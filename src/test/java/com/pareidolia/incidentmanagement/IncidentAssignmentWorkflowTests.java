@@ -40,7 +40,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @DataJpaTest(properties={"spring.datasource.url=jdbc:h2:mem:functional_assignment;MODE=MySQL;DB_CLOSE_DELAY=-1","spring.datasource.username=sa","spring.datasource.password=","spring.jpa.hibernate.ddl-auto=create-drop","app.incident-access.enabled=true","app.incident-assignment.enabled=true","app.incident-transfer.handoff-approved=true","app.department-membership-admin.enabled=true","app.department-membership-admin.allowed-emails=membership@example.test","app.employee-management.enabled=true","app.incident-security-admin.enabled=true","app.auth.allowed-domain=example.test","app.auth.bootstrap-admin-emails=","app.auth.bootstrap-it-handler-emails=","app.default-it-owner=legacy@example.test","app.incident-capability-admin.allowed-emails=classifier@example.test","app.incident-capability-admin.global-view-approver-emails=classifier@example.test"})
 @AutoConfigureTestDatabase(replace=AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("dev")
-@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,EligibleHandlerDirectory.class,IncidentAssignmentService.class, DepartmentMembershipAdminService.class, IncidentCapabilityAdministrationService.class, IncidentReportServiceImpl.class, com.pareidolia.incidentmanagement.service.impl.IncidentAttachmentServiceImpl.class})
+@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,EligibleHandlerDirectory.class,IncidentAssignmentService.class, DepartmentMembershipAdminService.class, IncidentCapabilityAdministrationService.class, IncidentReportServiceImpl.class, com.pareidolia.incidentmanagement.service.impl.IncidentAttachmentServiceImpl.class, HrReassignmentReferralService.class})
+@org.springframework.test.context.TestPropertySource(properties = "app.hr-reassignment-referrals.enabled=true")
+@org.springframework.test.context.event.RecordApplicationEvents
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentAssignmentWorkflowTests {
     @org.springframework.test.context.DynamicPropertySource
@@ -56,6 +58,8 @@ class IncidentAssignmentWorkflowTests {
     @Autowired IncidentReportService reports;
     @Autowired IncidentAccessPolicy incidentAccessPolicy;
     @Autowired DepartmentMembershipAdminService memberships;
+    @Autowired HrReassignmentReferralService referrals;
+    @Autowired org.springframework.test.context.event.ApplicationEvents applicationEvents;
     AppUser reporter,assigner,handler,alternate,classifier,membershipAdmin;Incident incident;
     @BeforeEach void setup(){
         try{db.queryForObject("select count(*) from incident_assignment_state",Long.class);}catch(org.springframework.dao.DataAccessException missing){
@@ -67,9 +71,9 @@ class IncidentAssignmentWorkflowTests {
                 db.execute("alter table app_users add column employee_id varchar(64) unique");
                 db.execute("create table employee_departments (id bigint primary key, display_name varchar(150) not null unique, active tinyint not null)");
             }
-            for(String script:List.of("handler-eligibility.REVIEW-ONLY.sql","incident-security-administration.REVIEW-ONLY.sql","incident-security-lock.REVIEW-ONLY.sql","assignment-schema.REVIEW-ONLY.sql","department-membership.REVIEW-ONLY.sql","department-membership-administration.REVIEW-ONLY.sql","incident-department-transfer.REVIEW-ONLY.sql","incident-transfer-handoff-approval.REVIEW-ONLY.sql"))new ResourceDatabasePopulator(new FileSystemResource(Path.of("docs","assignment",script))).execute(source);
+            for(String script:List.of("handler-eligibility.REVIEW-ONLY.sql","incident-security-administration.REVIEW-ONLY.sql","incident-security-lock.REVIEW-ONLY.sql","assignment-schema.REVIEW-ONLY.sql","department-membership.REVIEW-ONLY.sql","department-membership-administration.REVIEW-ONLY.sql","incident-department-transfer.REVIEW-ONLY.sql","incident-transfer-handoff-approval.REVIEW-ONLY.sql","hr-reassignment-referral.REVIEW-ONLY.sql","hr-referral-email-receipt.REVIEW-ONLY.sql"))new ResourceDatabasePopulator(new FileSystemResource(Path.of("docs","assignment",script))).execute(source);
         }
-        for(String table:List.of("incident_transfer_handoff_audit","incident_transfer_handoff_approvals","incident_department_transfer_audit","incident_global_view_audit","incident_attachments","incident_assignment_audit","incident_assignment_state","incident_security_grant_audit","incident_classification_audit","assignment_admin_capability_audit","handler_eligibility_audit","incident_security_grants","incident_security_classification","assignment_admin_capabilities","handler_eligibility_grants","incident_history","work_log_entries","incidents","employee_department_membership_audit","employee_department_memberships","employee_departments","app_users"))db.update("delete from "+table);
+        for(String table:List.of("hr_referral_email_receipt","hr_reassignment_referral_decision","hr_reassignment_referral_intake","incident_transfer_handoff_audit","incident_transfer_handoff_approvals","incident_department_transfer_audit","incident_global_view_audit","incident_attachments","incident_assignment_audit","incident_assignment_state","incident_security_grant_audit","incident_classification_audit","assignment_admin_capability_audit","handler_eligibility_audit","incident_security_grants","incident_security_classification","assignment_admin_capabilities","handler_eligibility_grants","incident_history","work_log_entries","incidents","employee_department_membership_audit","employee_department_memberships","employee_departments","app_users"))db.update("delete from "+table);
         reporter=account("reporter@example.test",AppUserRole.REPORTER);assigner=account("assigner@example.test",AppUserRole.ADMIN);handler=account("handler@example.test",AppUserRole.IT_HANDLER);alternate=account("alternate@example.test",AppUserRole.IT_HANDLER);classifier=account("classifier@example.test",AppUserRole.REPORTER);
         membershipAdmin = account("membership@example.test", AppUserRole.REPORTER);
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
@@ -81,6 +85,7 @@ class IncidentAssignmentWorkflowTests {
         }
         db.update("insert into assignment_admin_capabilities(user_id,capability,active,version) values (?,'ASSIGNMENT_ADMIN',1,0),(?,'INCIDENT_CLASSIFIER',1,0),(?,'CASE_ACCESS_ADMIN',1,0)",assigner.getId(),classifier.getId(),classifier.getId());
         org.springframework.test.util.ReflectionTestUtils.setField(assignments,"allowedPairs",Set.of(assigner.getId()+":"+handler.getId(),assigner.getId()+":"+alternate.getId()));
+        org.springframework.test.util.ReflectionTestUtils.setField(referrals, "itCoordinatorIds", Set.of());
         login(reporter);var created=incidentService.createIncident(request(handler.getId()));incident=incidents.findById(created.getId()).orElseThrow();
     }
     AppUser account(String email,AppUserRole role){var user=new AppUser();user.setEmail(email);user.setDisplayName(email.substring(0,email.indexOf('@'))+" Employee");user.setRole(role);user=users.saveAndFlush(user);db.update("update app_users set employee_id=? where id=?","EMP-"+user.getId(),user.getId());return user;}
@@ -90,6 +95,225 @@ class IncidentAssignmentWorkflowTests {
     void grant(Long user,String permission){db.update("insert into incident_security_grants(incident_id,user_id,permission,active,version) values (?,?,?,1,1)",incident.getId(),user,permission);}
     void standard(){login(classifier);administration.classify(incident.getId(),"STANDARD",0L,"Synthetic triage");grant(assigner.getId(),"VIEW");for(var user:List.of(handler,alternate)){grant(user.getId(),"VIEW");grant(user.getId(),"HANDLE");}login(assigner);}
     void conflict(Runnable work){assertThatThrownBy(work::run).isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));}
+
+    @Test
+    void hrReferralIntakeReturnsTheSameEmptyResponseWithoutCaseAccess() throws Exception {
+        AppUser requester = prepareHrReferral();
+        var mvc = MockMvcBuilders.standaloneSetup(
+                new com.pareidolia.incidentmanagement.controller.HrReassignmentReferralController(referrals))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
+        String endpoint = "/api/incident-assignment/hr-referrals";
+        String unknown = "INC-20260101-000000-ABCDEF12";
+        for (String reference : List.of(incident.getIncidentNumber(), unknown, "invalid", incident.getIncidentNumber())) {
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(endpoint)
+                    .contentType("application/json").content("{\"incidentReference\":\"" + reference + "\"}"))
+                    .andExpect(status().isAccepted())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().string(""));
+        }
+        var notifications = applicationEvents.stream(HrReassignmentReferralService.HrReferralQueued.class).toList();
+        assertThat(notifications).hasSize(2);
+        assertThat(HrReassignmentReferralService.HrReferralQueued.class.getRecordComponents())
+                .extracting(java.lang.reflect.RecordComponent::getName).containsExactly("referralId");
+        assertThat(db.queryForObject("select count(*) from hr_reassignment_referral_intake where requester_id=?",
+                Long.class, requester.getId())).isEqualTo(4L);
+        assertThatThrownBy(() -> incidentService.getIncident(incident.getId())).isInstanceOf(
+                com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        mvc.perform(get(endpoint + "/" + notifications.get(0).referralId())).andExpect(status().isForbidden());
+        login(assigner);
+        mvc.perform(get(endpoint + "/" + notifications.get(0).referralId())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.incidentId").value(incident.getId()))
+                .andExpect(jsonPath("$.description").doesNotExist()).andExpect(jsonPath("$.handler").doesNotExist());
+        mvc.perform(get(endpoint + "/" + notifications.get(1).referralId())).andExpect(status().isNotFound());
+        login(handler);
+        assertThatThrownBy(() -> referrals.submit(incident.getIncidentNumber())).isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> referrals.review(notifications.get(0).referralId())).isInstanceOf(AccessDeniedException.class);
+
+        login(requester);
+        for (int i = 0; i < 16; i++) referrals.submit(null);
+        assertThatThrownBy(() -> referrals.submit(unknown)).isInstanceOfSatisfying(ResponseStatusException.class,
+                error -> assertThat(error.getStatusCode().value()).isEqualTo(429));
+        assertThat(applicationEvents.stream(HrReassignmentReferralService.HrReferralQueued.class)).hasSize(2);
+    }
+
+    @Test
+    void hrReferralRejectsCaseAccessWithoutGrantsAndRejectionPreservesAssignment() {
+        prepareHrReferral();
+        UUID id = submitHrReferral();
+        db.update("insert into assignment_admin_capabilities(user_id,capability,active,version) values (?,'ASSIGNMENT_ADMIN',1,0)",
+                classifier.getId());
+        login(classifier);
+        var reject = new HrReassignmentReferralService.Decision(HrReassignmentReferralService.Outcome.REJECTED,
+                "Keep current assignment", null, null);
+        assertThatThrownBy(() -> referrals.review(id)).isInstanceOfSatisfying(ResponseStatusException.class,
+                error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        assertThatThrownBy(() -> referrals.decide(id, reject)).isInstanceOfSatisfying(ResponseStatusException.class,
+                error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        login(assigner);
+        var before = assignments.history(incident.getId());
+        referrals.decide(id, reject);
+        conflict(() -> referrals.decide(id, reject));
+        assertThat(referrals.review(id).outcome()).isEqualTo(HrReassignmentReferralService.Outcome.REJECTED);
+        assertThat(assignments.get(incident.getId()).handler().id()).isEqualTo(handler.getId());
+        assertThat(assignments.history(incident.getId())).isEqualTo(before);
+        assertThat(db.queryForObject("select count(*) from hr_reassignment_referral_decision where reviewer_id=?",
+                Long.class, assigner.getId())).isEqualTo(1L);
+    }
+
+    @Test
+    void hrReferralExecutionRequiresReconciledGrantsAndSerializesConcurrentDecisions() throws Exception {
+        prepareHrReferral();
+        UUID id = submitHrReferral();
+        login(assigner);
+        var approve = new HrReassignmentReferralService.Decision(HrReassignmentReferralService.Outcome.REASSIGNED,
+                "Approved HR reassignment", new HrReassignmentReferralService.Reassignment(alternate.getId(), 1L, 1L), null);
+        conflict(() -> referrals.decide(id, approve));
+        assertThat(referrals.review(id).outcome()).isNull();
+        assertThat(assignments.get(incident.getId()).handler().id()).isEqualTo(handler.getId());
+        reconcileFormerHandler();
+        login(classifier);
+        administration.setGrant(incident.getId(), alternate.getId(), "HANDLE", false, 1L, "Pause access");
+        login(assigner);
+        assertThatThrownBy(() -> referrals.decide(id, approve)).isInstanceOf(AccessDeniedException.class);
+        login(classifier);
+        administration.setGrant(incident.getId(), alternate.getId(), "HANDLE", true, 2L, "Restore authorized access");
+
+        var workers = Executors.newFixedThreadPool(2);
+        try {
+            var start = new CountDownLatch(1);
+            Callable<Boolean> decide = () -> {
+                login(assigner);
+                try {
+                    start.await();
+                    referrals.decide(id, approve);
+                    return true;
+                } catch (ResponseStatusException rejected) {
+                    assertThat(rejected.getStatusCode().value()).isEqualTo(409);
+                    return false;
+                } finally {
+                    SecurityContextHolder.clearContext();
+                }
+            };
+            var first = workers.submit(decide);
+            var second = workers.submit(decide);
+            start.countDown();
+            assertThat(List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder(true, false);
+        } finally {
+            workers.shutdownNow();
+        }
+        login(assigner);
+        assertThat(referrals.review(id).outcome()).isEqualTo(HrReassignmentReferralService.Outcome.REASSIGNED);
+        assertThat(assignments.get(incident.getId()).handler().id()).isEqualTo(alternate.getId());
+        assertThat(assignments.history(incident.getId())).hasSize(2);
+        assertThat(db.queryForObject("select count(*) from hr_reassignment_referral_decision", Long.class)).isEqualTo(1L);
+    }
+
+    @Test
+    void hrReferralTransferApprovalDoesNotReplaceIndependentHandoff() {
+        prepareHrReferral();
+        UUID id = submitHrReferral();
+        db.update("insert into employee_departments(id,display_name,active) values (73,'Operations',1)");
+        db.update("insert into employee_department_memberships(department_id,user_id,active) values (73,?,1)", alternate.getId());
+        transferRoutes(Set.of(assigner.getId() + ":72:73"));
+        reconcileFormerHandler();
+        var transfer = new IncidentTransferRequest(72L, 73L, alternate.getId(), 1L, 1L, "Transfer", "MISSING-HANDOFF");
+        var approve = new HrReassignmentReferralService.Decision(HrReassignmentReferralService.Outcome.TRANSFERRED,
+                "Approved referral", null, transfer);
+        assertThatThrownBy(() -> referrals.decide(id, approve)).isInstanceOfSatisfying(ResponseStatusException.class,
+                error -> {
+                    assertThat(error.getStatusCode().value()).isEqualTo(409);
+                    assertThat(error.getReason()).isEqualTo("Case access requires independent handoff review.");
+                });
+        assertThat(referrals.review(id).outcome()).isNull();
+        assertThat(transferAuditCount()).isZero();
+        assertThat(incidents.findById(incident.getId()).orElseThrow().getResponsibleDepartmentId()).isEqualTo(72L);
+    }
+
+    private AppUser prepareHrReferral() {
+        var request = request(null);
+        request.setIssueType(IssueType.HR_ISSUE);
+        request.setResponsibleDepartmentId(72L);
+        incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
+        login(classifier);
+        administration.classify(incident.getId(), "RESTRICTED", 0L, "Confidential HR");
+        grant(assigner.getId(), "VIEW");
+        grant(assigner.getId(), "ASSIGN");
+        for (var candidate : List.of(handler, alternate)) {
+            db.update("insert into employee_department_memberships(department_id,user_id,active) values (72,?,1)", candidate.getId());
+            grant(candidate.getId(), "VIEW");
+            grant(candidate.getId(), "HANDLE");
+        }
+        login(assigner);
+        assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Initial HR assignment");
+        AppUser requester = account("it-coordinator@example.test", AppUserRole.IT_HANDLER);
+        db.update("insert into assignment_admin_capabilities(user_id,capability,active,version) values (?,'ASSIGNMENT_ADMIN',1,0)",
+                requester.getId());
+        org.springframework.test.util.ReflectionTestUtils.setField(referrals, "itCoordinatorIds", Set.of(requester.getId()));
+        login(requester);
+        return requester;
+    }
+
+    private UUID submitHrReferral() {
+        referrals.submit(incident.getIncidentNumber());
+        return applicationEvents.stream(HrReassignmentReferralService.HrReferralQueued.class).findFirst().orElseThrow().referralId();
+    }
+
+    @Test
+    void referralNotificationRequiresCurrentScopeAndClaimsDeliveryOnce() throws Exception {
+        AppUser requester = prepareHrReferral();
+        UUID id = submitHrReferral();
+        AppUser backup = account("backup@example.test", AppUserRole.ADMIN);
+        db.update("insert into assignment_admin_capabilities(user_id,capability,active,version) values (?,'ASSIGNMENT_ADMIN',1,0)",
+                backup.getId());
+        grant(backup.getId(), "VIEW");
+        grant(backup.getId(), "ASSIGN");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
+                assigner.getId() + "," + backup.getId());
+        var env = org.springframework.test.util.ReflectionTestUtils.getField(referrals, "environment");
+        var configured = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("app.hr-reassignment-referrals.reviewers.primary-id", assigner.getId().toString())
+                .withProperty("app.hr-reassignment-referrals.reviewers.backup-id", backup.getId().toString());
+        org.springframework.test.util.ReflectionTestUtils.setField(referrals, "environment", configured);
+        try {
+            assertThatThrownBy(referrals::pending).isInstanceOf(AccessDeniedException.class);
+            assertThat(referrals.claimNotice(id, requester.getId(), null)).isNull();
+            login(assigner);
+            assertThat(referrals.pending()).containsExactly(id);
+            assertThat(referrals.claimNotice(id, assigner.getId(), null)).isNull();
+            db.update("update app_users set last_login_at=current_timestamp where id in (?,?)", assigner.getId(), backup.getId());
+            assertThat(referrals.claimNotice(id, assigner.getId(), Set.of("other@example.test"))).isNull();
+            db.update("update app_users set active=0 where id=?", backup.getId());
+            assertThat(referrals.claimNotice(id, backup.getId(), null)).isNull();
+            db.update("update app_users set active=1 where id=?", backup.getId());
+            db.update("update incident_security_grants set active=0 where incident_id=? and user_id=? and permission='ASSIGN'",
+                    incident.getId(), backup.getId());
+            assertThat(referrals.claimNotice(id, backup.getId(), null)).isNull();
+            login(backup);
+            assertThat(referrals.pending()).isEmpty();
+            db.update("update incident_security_grants set active=1 where incident_id=? and user_id=? and permission='ASSIGN'",
+                    incident.getId(), backup.getId());
+            assertThat(referrals.pending()).containsExactly(id);
+            assertThat(referrals.claimNotice(id, backup.getId(), null)).isEqualTo(backup.getEmail());
+            referrals.recordNoticeResult(id, backup.getId(), true);
+
+            var workers = Executors.newFixedThreadPool(2);
+            try {
+                Callable<String> claim = () -> referrals.claimNotice(id, assigner.getId(), null);
+                var first = workers.submit(claim);
+                var second = workers.submit(claim);
+                assertThat(Arrays.asList(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS)))
+                        .containsExactlyInAnyOrder(assigner.getEmail(), null);
+            } finally {
+                workers.shutdownNow();
+            }
+            referrals.recordNoticeResult(id, assigner.getId(), false);
+            assertThat(referrals.claimNotice(id, assigner.getId(), null)).isNull();
+            assertThat(db.queryForList("select status from hr_referral_email_receipt", String.class))
+                    .containsExactlyInAnyOrder("SENT", "UNCERTAIN");
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(referrals, "environment", env);
+        }
+    }
     @Test
     void membershipDiscoveryUsesIndependentAuthorizationAndOnlyActiveTargets() {
         login(assigner);
@@ -203,6 +427,7 @@ class IncidentAssignmentWorkflowTests {
     @Test
     void assignmentWaitingOnMembershipRevocationRechecksMembershipBeforeWriting() throws Exception {
         standard();
+        db.update("update app_users set role='ADMIN' where id=?", handler.getId());
         var revoked = new CountDownLatch(1);
         var commit = new CountDownLatch(1);
         var assignmentStarted = new CountDownLatch(1);
@@ -715,8 +940,8 @@ class IncidentAssignmentWorkflowTests {
 
     private void reconcileFormerHandler() {
         login(classifier);
-        administration.setGrant(incident.getId(), handler.getId(), "VIEW", false, 1L, "Approved transfer");
-        administration.setGrant(incident.getId(), handler.getId(), "HANDLE", false, 1L, "Approved transfer");
+        administration.setGrant(incident.getId(), handler.getId(), "VIEW", false, 1L, "Reconcile former handler access");
+        administration.setGrant(incident.getId(), handler.getId(), "HANDLE", false, 1L, "Reconcile former handler access");
         login(assigner);
     }
 
@@ -846,7 +1071,151 @@ class IncidentAssignmentWorkflowTests {
     @Test void eligibleSearchReusesOfficialDirectoryAndEscapesWildcards(){assertThat(assignments.search("HANDLER",null)).extracting(EligibleHandlerDirectory.Employee::id).containsExactly(handler.getId());assertThat(assignments.search("Employee",null)).hasSize(2);assertThat(assignments.search("%_",null)).isEmpty();assertThat(assignments.search("reporter",null)).isEmpty();}
     @Test void invalidInactiveAndIneligibleProposalRollsBackCreation(){long before=incidents.count();db.update("update app_users set active=false where id=?",handler.getId());assertThatThrownBy(()->incidentService.createIncident(request(handler.getId()))).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThat(incidents.count()).isEqualTo(before);assertThatThrownBy(()->incidentService.createIncident(request(reporter.getId()))).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThatThrownBy(()->incidentService.createIncident(request(Long.MAX_VALUE))).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);}
     @Test void classifierCanReviewUnclassifiedButOrdinarySearchesDoNotLeak(){login(classifier);assertThat(assignments.triage()).hasSize(1);assertThat(assignments.triageDetail(incident.getId()).incident().getTitle()).isEqualTo("Synthetic incident");login(assigner);assertThat(assignments.triage()).isEmpty();assertThatThrownBy(()->assignments.triageDetail(incident.getId())).isInstanceOf(ResponseStatusException.class);assertThat(incidentService.getAllIncidents()).isEmpty();}
-    @Test void standardAssignmentAndReassignmentUseStableIdsAndAtomicHistory(){standard();var first=assignments.assign(incident.getId(),handler.getId(),0L,1L,"Initial approved handler");assertThat(first.handler().id()).isEqualTo(handler.getId());assertThat(first.version()).isEqualTo(1);assertThat(first.proposal().id()).isEqualTo(handler.getId());var next=assignments.assign(incident.getId(),alternate.getId(),1L,1L,"Different approved handler");assertThat(next.handler().id()).isEqualTo(alternate.getId());assertThat(next.version()).isEqualTo(2);assertThat(assignments.history(incident.getId())).hasSize(2);assertThat(assignments.history(incident.getId()).get(0).previousHandlerId()).isEqualTo(handler.getId());assertThat(incidents.findById(incident.getId()).orElseThrow().getAssignedOwner()).isEqualTo(alternate.getEmail());assertThat(db.queryForObject("select count(*) from incident_history where incident_id=? and action_type='OWNER_ASSIGNED'",Long.class,incident.getId())).isEqualTo(2);}
+    @Test
+    void standardAssignmentAndReassignmentUseStableIdsAndAtomicHistory() {
+        standard();
+        var first = assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Initial approved handler");
+        assertThat(first.handler().id()).isEqualTo(handler.getId());
+        assertThat(first.version()).isEqualTo(1);
+        assertThat(first.proposal().id()).isEqualTo(handler.getId());
+        var originalHistory = incidentService.getIncidentHistory(incident.getId());
+        var originalAssignmentHistory = assignments.history(incident.getId());
+
+        conflict(() -> assignments.assign(incident.getId(), alternate.getId(), 1L, 1L, "Unreconciled handler"));
+        var blocked = assignments.get(incident.getId());
+        assertThat(blocked.handler().id()).isEqualTo(handler.getId());
+        assertThat(blocked.version()).isEqualTo(1);
+        assertThat(incidents.findById(incident.getId()).orElseThrow().getAssignedOwner()).isEqualTo(handler.getEmail());
+        assertThat(incidentService.getIncidentHistory(incident.getId()))
+                .usingRecursiveComparison().isEqualTo(originalHistory);
+        assertThat(assignments.history(incident.getId())).isEqualTo(originalAssignmentHistory);
+
+        reconcileFormerHandler();
+        var next = assignments.assign(incident.getId(), alternate.getId(), 1L, 1L, "Different approved handler");
+        assertThat(next.handler().id()).isEqualTo(alternate.getId());
+        assertThat(next.version()).isEqualTo(2);
+        assertThat(assignments.history(incident.getId())).hasSize(2);
+        assertThat(assignments.history(incident.getId()).get(0).previousHandlerId()).isEqualTo(handler.getId());
+        assertThat(incidents.findById(incident.getId()).orElseThrow().getAssignedOwner()).isEqualTo(alternate.getEmail());
+        assertThat(db.queryForObject("select count(*) from incident_history where incident_id=? and action_type='OWNER_ASSIGNED'",
+                Long.class, incident.getId())).isEqualTo(2);
+        assertThat(db.queryForList("select permission from incident_security_grants where incident_id=? and user_id=? and active=1",
+                String.class, incident.getId(), alternate.getId())).containsExactlyInAnyOrder("VIEW", "HANDLE");
+
+        var resolution = new ResolveIncidentRequestDto();
+        resolution.setResolutionDetails("Fixed synthetic issue");
+        login(handler);
+        assertThatThrownBy(() -> incidentService.getIncident(incident.getId())).isInstanceOf(
+                com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        assertThatThrownBy(() -> incidentService.resolveIncident(incident.getId(), resolution)).isInstanceOf(
+                com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        login(alternate);
+        assertThat(incidentService.getIncident(incident.getId()).getId()).isEqualTo(incident.getId());
+        assertThat(incidentService.resolveIncident(incident.getId(), resolution).getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+    }
+
+    @Test
+    void reassignmentPreservesFormerHandlersIndependentReporterView() {
+        db.update("update app_users set role='ADMIN' where id=?", handler.getId());
+        login(handler);
+        var reported = incidentService.createIncident(request(null));
+        incident = incidents.findById(reported.getId()).orElseThrow();
+        standard();
+        assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Initial approved handler");
+
+        login(classifier);
+        administration.setGrant(incident.getId(), handler.getId(), "HANDLE", false, 1L, "Reconcile handling access");
+        login(assigner);
+        assertThat(assignments.assign(incident.getId(), alternate.getId(), 1L, 1L, "Different approved handler").handler().id())
+                .isEqualTo(alternate.getId());
+
+        login(handler);
+        assertThat(db.queryForList("select permission from incident_security_grants where incident_id=? and user_id=? and active=1",
+                String.class, incident.getId(), handler.getId())).containsExactly("VIEW");
+        assertThat(incidentService.getIncident(incident.getId()).getId()).isEqualTo(incident.getId());
+        var resolution = new ResolveIncidentRequestDto();
+        resolution.setResolutionDetails("Former handler must not resolve");
+        assertThatThrownBy(() -> incidentService.resolveIncident(incident.getId(), resolution))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "Operations (Annotation)", "Operations (Perioperative Flow Analysis)", "HR", "R&D"
+    })
+    void ordinaryItServiceUsesCaseGrantsWithoutOrganizationalMembership(String reporterDepartment) {
+        db.update("insert into employee_departments(id,display_name,active) values (73,'Operations (Annotation)',1)");
+        var request = request(null);
+        request.setReporterDepartment(reporterDepartment);
+        request.setResponsibleDepartmentId("Operations (Annotation)".equals(reporterDepartment) ? 73L : null);
+        incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
+        Long id = incident.getId();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
+                classifier.getId().toString());
+        login(classifier);
+        administration.classify(id, "STANDARD", 0L, "Ordinary IT support");
+        grant(assigner.getId(), "VIEW");
+        login(handler);
+        assertThatThrownBy(() -> incidentService.getIncident(id)).isInstanceOf(
+                com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        login(assigner);
+        assertThat(assignments.get(id).canAssign()).isTrue();
+        assertThat(assignments.search("handler", id)).isEmpty();
+        assertThatThrownBy(() -> assignments.assign(id, handler.getId(), 0L, 1L, "Missing grants"))
+                .isInstanceOf(AccessDeniedException.class);
+
+        grant(handler.getId(), "VIEW");
+        grant(handler.getId(), "HANDLE");
+        assertThat(assignments.search("handler", id)).extracting(EligibleHandlerDirectory.Employee::id)
+                .containsExactly(handler.getId());
+        assertThat(assignments.assign(id, handler.getId(), 0L, 1L, "Assign IT service handler").handler().id())
+                .isEqualTo(handler.getId());
+        assertThat(incidents.findById(id).orElseThrow().getResponsibleDepartmentId()).isEqualTo(request.getResponsibleDepartmentId());
+        login(handler);
+        var resolution = new ResolveIncidentRequestDto();
+        resolution.setResolutionDetails("Restored synthetic service");
+        assertThat(incidentService.resolveIncident(id, resolution).getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+    }
+
+    @Test
+    void itServiceAssignmentStillRequiresEligibleRoleAndCoordinatorScope() {
+        var request = request(null);
+        request.setResponsibleDepartmentId(null);
+        incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
+        standard();
+        Long id = incident.getId();
+        db.update("update handler_eligibility_grants set active=0 where user_id=?", handler.getId());
+        db.update("update app_users set role='ADMIN' where id=?", alternate.getId());
+        assertThat(assignments.search("Employee", id)).isEmpty();
+        assertThatThrownBy(() -> assignments.assign(id, handler.getId(), 0L, 1L, "Ineligible IT handler"))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> assignments.assign(id, alternate.getId(), 0L, 1L, "No IT role"))
+                .isInstanceOf(AccessDeniedException.class);
+        db.update("update handler_eligibility_grants set active=1 where user_id=?", handler.getId());
+        org.springframework.test.util.ReflectionTestUtils.setField(assignments, "allowedPairs", Set.of());
+        assertThat(assignments.search("handler", id)).isEmpty();
+        assertThatThrownBy(() -> assignments.assign(id, handler.getId(), 0L, 1L, "No coordinator scope"))
+                .isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    void itIssueTypeCannotMakeConfidentialHrContentAssignableToIt() {
+        var request = request(null);
+        request.setTitle("Confidential payroll complaint");
+        request.setReporterDepartment("HR");
+        request.setResponsibleDepartmentId(null);
+        incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
+        Long id = incident.getId();
+        standard();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
+                classifier.getId() + "," + assigner.getId());
+        assertThat(assignments.get(id).canAssign()).isFalse();
+        assertThatThrownBy(() -> assignments.assign(id, handler.getId(), 0L, 1L, "Confidential case"))
+                .isInstanceOf(AccessDeniedException.class);
+        login(handler);
+        assertThatThrownBy(() -> incidentService.getIncident(id)).isInstanceOf(
+                com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+    }
     @Test void noCapabilityNoViewNoScopeAndNoEligibilityDeny(){standard();login(reporter);assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"Unauthorized")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);login(assigner);db.update("update handler_eligibility_grants set active=0 where user_id=?",handler.getId());assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"No eligibility")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);org.springframework.test.util.ReflectionTestUtils.setField(assignments,"allowedPairs",Set.of());assertThatThrownBy(()->assignments.assign(incident.getId(),alternate.getId(),0L,1L,"No scope")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThat(assignments.search("Employee",incident.getId())).isEmpty();}
     @Test void handlerAccessIsRequiredAndIsNeverCreatedByAssignment(){standard();db.update("delete from incident_security_grants where user_id=? and permission='HANDLE'",handler.getId());assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"Missing case access")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThat(assignments.get(incident.getId()).handler()).isNull();assertThat(assignments.search("handler",incident.getId())).isEmpty();}
     @Test void unclassifiedAndRestrictedDenyUntilIndependentPermissionsExist(){grant(assigner.getId(),"VIEW");login(assigner);assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,0L,"Unclassified")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);login(classifier);administration.classify(incident.getId(),"RESTRICTED",0L,"Sensitive case");grant(handler.getId(),"VIEW");grant(handler.getId(),"HANDLE");login(assigner);assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"No ASSIGN")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);grant(assigner.getId(),"ASSIGN");assertThat(assignments.assign(incident.getId(),handler.getId(),0L,1L,"Explicit case permissions").handler().id()).isEqualTo(handler.getId());}
@@ -933,13 +1302,17 @@ class IncidentAssignmentWorkflowTests {
     }
 
     @Test
-    void missingOrInactiveResponsibleDepartmentCannotAuthorizeAssignment() {
+    void inactiveDepartmentAndRestrictedCaseWithoutDepartmentCannotAuthorizeAssignment() {
         standard();
         db.update("update employee_departments set active=0 where id=71");
         assertThatThrownBy(() -> assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Inactive department"))
                 .isInstanceOf(ResponseStatusException.class);
         db.update("update incidents set responsible_department_id=null where id=?", incident.getId());
-        assertThatThrownBy(() -> assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Missing department"))
+        login(classifier);
+        administration.classify(incident.getId(), "RESTRICTED", 1L, "Sensitive case");
+        grant(assigner.getId(), "ASSIGN");
+        login(assigner);
+        assertThatThrownBy(() -> assignments.assign(incident.getId(), handler.getId(), 0L, 2L, "Restricted without department"))
                 .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
     }
 

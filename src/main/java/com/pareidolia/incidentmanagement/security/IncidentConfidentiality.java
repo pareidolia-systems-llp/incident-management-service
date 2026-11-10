@@ -39,11 +39,25 @@ public final class IncidentConfidentiality {
     }
 
     public static boolean requiresRestriction(Incident incident, String responsibleDepartment) {
+        return requiresRestriction(incident, responsibleDepartment, incident.getReporterDepartment());
+    }
+
+    /** An exact HR affiliation is distinct from an HR subject in guarded IT service routing. */
+    public static boolean isOrdinaryItService(Incident incident, String responsibleDepartment) {
+        String affiliation = incident.getReporterDepartment();
+        if (affiliation != null
+                && ("HR".equalsIgnoreCase(affiliation.trim()) || "Human Resources".equalsIgnoreCase(affiliation.trim()))) {
+            affiliation = null;
+        }
+        return !requiresRestriction(incident, responsibleDepartment, affiliation);
+    }
+
+    private static boolean requiresRestriction(Incident incident, String responsibleDepartment, String reporterDepartment) {
         IssueType type = incident.getIssueType();
         if (type == null || (type != IssueType.IT_ISSUE && type != IssueType.SERVICE_REQUEST)) return true;
         if (incident.getResponsibleDepartmentId() != null
                 && (responsibleDepartment == null || responsibleDepartment.isBlank())) return true;
-        return java.util.stream.Stream.of(responsibleDepartment, incident.getReporterDepartment(),
+        return java.util.stream.Stream.of(responsibleDepartment, reporterDepartment,
                         incident.getCategory(), incident.getTitle(), incident.getDescription(),
                         incident.getAffectedSystem(), incident.getImpactedUserOrDepartment())
                 .anyMatch(value -> value != null && PROTECTED_HINT.matcher(value).find());

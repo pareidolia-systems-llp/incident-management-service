@@ -157,6 +157,11 @@ public class IncidentAccessPolicy {
                     || hrAccounts.contains(account.getId()));
     }
 
+    public boolean hasHrAccountScope(AppUser account) {
+        return account != null && account.getId() != null && Boolean.TRUE.equals(account.getActive())
+                && hrAccounts.contains(account.getId());
+    }
+
     private boolean allowsHrScope(AppUser account, Incident incident, java.util.Map<Long, String> departments) {
         return IncidentConfidentiality.isReporter(account, incident) || allowsHrOperations(account, incident, departments);
     }
@@ -165,7 +170,13 @@ public class IncidentAccessPolicy {
         Long departmentId = incident.getResponsibleDepartmentId();
         String department = departmentId == null ? null : departments.get(departmentId);
         if (departmentId != null && department == null) return false;
-        return !isHrCase(incident, department) || hrAccounts.contains(account.getId());
+        if (!isHrCase(incident, department) || hrAccounts.contains(account.getId())) return true;
+        return enabled && !isHrDepartment(departmentId, department)
+                && IncidentConfidentiality.isOrdinaryItService(incident, department)
+                && em.createNativeQuery("""
+                        select incident_id from incident_security_classification
+                        where incident_id = :incident and classification = 'STANDARD' and version > 0
+                        """).setParameter("incident", incident.getId()).getResultList().size() == 1;
     }
 
     private final EntityManager em;

@@ -73,7 +73,27 @@ class VerifiedIncidentMailRouting {
                     && (!restricted || incidents.countActiveCaseViewGrants(incident.getId(), account.getId()) == 1))
                     .ifPresent(account -> authorized.add(address));
         }
+        if (policy.isEnabled() && department.equals(responsible)
+                && environment.getProperty(PREFIX + "department-head-notifications.enabled", Boolean.class, false)
+                && IncidentEmailPortalLink.url(environment.getProperty("app.notifications.email.portal-origin", "")) != null) {
+            Set<String> heads = matrix(department, "department-head-recipients");
+            if (restricted) heads.retainAll(matrix(department, "restricted-recipients"));
+            for (String address : heads) {
+                accounts.findByEmail(address).filter(account -> Boolean.TRUE.equals(account.getActive())
+                        && account.getLastLoginAt() != null && activeHead(department, account.getId())
+                        && policy.allowsHrOperations(account, incident)
+                        && incidents.countActiveCaseViewGrants(incident.getId(), account.getId()) == 1)
+                        .ifPresent(account -> authorized.add(address));
+            }
+        }
         return authorized;
+    }
+
+    private boolean activeHead(Long department, Long userId) {
+        return Integer.valueOf(1).equals(jdbc.queryForObject("""
+                select count(*) from department_head_designations
+                where department_id=? and user_id=? and active=1
+                """, Integer.class, department, userId));
     }
 
     private boolean activeMember(Long department, Long userId) {

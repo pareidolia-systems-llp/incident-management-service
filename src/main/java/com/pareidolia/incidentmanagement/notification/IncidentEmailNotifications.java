@@ -1,5 +1,6 @@
 package com.pareidolia.incidentmanagement.notification;
 
+import com.pareidolia.incidentmanagement.service.HrReassignmentReferralService;
 import jakarta.mail.internet.InternetAddress;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -25,6 +26,12 @@ public final class IncidentEmailNotifications {
     private final Executor executor;
     private final IncidentEmailDetailPolicy detailPolicy;
     private final VerifiedIncidentMailRouting verifiedRouting;
+    private HrReassignmentReferralService hrReferrals;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void hrReferrals(HrReassignmentReferralService referrals) {
+        this.hrReferrals = referrals;
+    }
     IncidentEmailNotifications(Settings settings, Environment environment, ObjectProvider<JavaMailSender> senders,
             Executor executor, IncidentEmailDetailPolicy detailPolicy) {
         this(settings, environment, senders, executor, detailPolicy, null);
@@ -61,6 +68,65 @@ public final class IncidentEmailNotifications {
             });
         } catch (RuntimeException failure) {
             LOG.warn("Incident email task was not queued.");
+        }
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void hrReferralQueued(HrReassignmentReferralService.HrReferralQueued event) {
+        if (!hrReferralMailEnabled()) return;
+        try {
+            executor.execute(() -> {
+                try {
+                    deliverHrReferral(event.referralId());
+                } catch (RuntimeException failure) {
+                    LOG.warn("Referral email could not be processed. referral_id={}", event.referralId());
+                }
+            });
+        } catch (RuntimeException failure) {
+            LOG.warn("Referral email task was not queued. referral_id={}", event.referralId());
+        }
+    }
+
+    private boolean hrReferralMailEnabled() {
+        return hrReferrals != null && settings.enabled()
+                && environment.getProperty("app.notifications.email.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.hr-referrals.enabled", Boolean.class, false);
+    }
+
+    private void deliverHrReferral(UUID referralId) {
+        if (!hrReferralMailEnabled()) return;
+        boolean dev = environment.acceptsProfiles(Profiles.of("dev & !prod & !production & !default"));
+        boolean production = environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
+                && environment.getProperty("app.notifications.email.local-postfix-enabled", Boolean.class, false);
+        if (dev == production) return;
+        String portal = IncidentEmailPortalLink.url(environment.getProperty("app.notifications.email.portal-origin", ""));
+        if (portal == null) return;
+        String from = address(settings.from());
+        JavaMailSender sender = senders.getIfUnique();
+        if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
+        var allowedAddresses = dev ? addresses(settings.devAllowlist()) : null;
+        for (long reviewer : hrReferrals.notificationReviewerIds()) {
+            if (!hrReferralMailEnabled()) return;
+            try {
+                String email = hrReferrals.claimNotice(referralId, reviewer, allowedAddresses);
+                if (email == null) continue;
+                boolean sent = false;
+                try {
+                    var message = new SimpleMailMessage();
+                    message.setFrom(from);
+                    message.setTo(address(email));
+                    message.setSubject("Portal review requested");
+                    message.setText("A review is pending. Sign in to the portal: " + portal
+                            + "\nReview reference: " + referralId);
+                    sender.send(message);
+                    sent = true;
+                } catch (RuntimeException failure) {
+                    LOG.warn("Referral email delivery is uncertain. referral_id={} recipient_id={}", referralId, reviewer);
+                }
+                hrReferrals.recordNoticeResult(referralId, reviewer, sent);
+            } catch (RuntimeException failure) {
+                LOG.warn("Referral email authorization or audit unavailable. referral_id={} recipient_id={}", referralId, reviewer);
+            }
         }
     }
 
