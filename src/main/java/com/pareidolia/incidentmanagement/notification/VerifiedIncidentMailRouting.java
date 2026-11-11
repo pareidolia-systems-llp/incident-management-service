@@ -51,6 +51,28 @@ class VerifiedIncidentMailRouting {
         return environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false);
     }
 
+    Map<String, Recipient> globalHrRecipients(String incidentNumber) {
+        if (!policy.isEnabled() || !usesManagedRecipients()) return Map.of();
+        return snapshot.read(() -> {
+            Long department = environment.getProperty(PREFIX + "hr-department-id", Long.class);
+            if (department == null || department <= 0) return Map.of();
+            String name = incidents.findActiveResponsibleDepartmentName(department).orElse(null);
+            if (name == null || !policy.isHrDepartment(department, name)) return Map.of();
+            Incident incident = incidents.findByIncidentNumber(incidentNumber).orElse(null);
+            if (incident == null) return Map.of();
+            var authorized = new LinkedHashMap<String, Recipient>();
+            for (String email : jdbc.queryForList("""
+                    select email from incident_department_mail_recipient
+                    where department_id=? and active=true order by email
+                    """, String.class, department)) {
+                accounts.findByEmail(email).filter(account -> Boolean.TRUE.equals(account.getActive())
+                        && account.getLastLoginAt() != null && email.equals(account.getEmail())
+                        && activeMember(department, account.getId()))
+                        .ifPresent(account -> authorized.put(email, new Recipient(incident.getId(), account.getId(), email)));
+            }
+            return authorized;
+        });
+    }
     Recipient managedRecipient(String incidentNumber, String address) {
         return resolveCurrent(incidentNumber).department().get(address);
     }

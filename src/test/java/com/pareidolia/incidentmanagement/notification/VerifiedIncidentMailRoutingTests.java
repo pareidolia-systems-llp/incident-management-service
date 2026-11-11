@@ -97,6 +97,62 @@ class VerifiedIncidentMailRoutingTests {
         assertThat(routing.recipients(number)).isEmpty();
     }
 
+    @Test void genericHrNoticesAreDefaultOffMinimalAndDeduplicatedAcrossDepartments() throws Exception {
+        env.setActiveProfiles("dev");
+        env.setProperty("app.incident-access.enabled", "true");
+        env.setProperty("app.notifications.email.enabled", "true");
+        env.setProperty("app.notifications.email.managed-recipients.enabled", "true");
+        env.setProperty(PREFIX + "enabled", "true");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        when(db.queryForList(contains("incident_department_mail_recipient"), eq(String.class), eq(2L)))
+                .thenReturn(List.of("hr@example.test", "hr@example.test"));
+        var hr = accounts.findByEmail("hr@example.test").orElseThrow();
+        hr.setLastLoginAt(java.time.LocalDateTime.now());
+        var jdbc = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:generic_hr_receipts;DB_CLOSE_DELAY=-1", "sa", ""));
+        jdbc.execute("create table incident_department_head_email_receipt (incident_id bigint, recipient_user_id bigint, status varchar(10), finished_at timestamp, primary key (incident_id, recipient_user_id))");
+        @SuppressWarnings("unchecked") ObjectProvider<JavaMailSender> provider = mock(ObjectProvider.class);
+        var sender = mock(JavaMailSender.class);
+        when(provider.getIfUnique()).thenReturn(sender);
+        when(sender.createMimeMessage()).thenAnswer(call -> new MimeMessage(Session.getInstance(new Properties())));
+        var notifier = new IncidentEmailNotifications(
+                new IncidentEmailNotifications.Settings(true, "sender@example.test", "", "", "hr@example.test"),
+                env, provider, Runnable::run, new IncidentEmailDetailPolicy(env, java.util.stream.Stream::empty), routing);
+        notifier.departmentHeadReceipt(new DepartmentHeadMailReceipt(jdbc));
+        notifier.created(new IncidentCreated(number));
+        verify(sender, never()).send(any(MimeMessage.class));
+
+        env.setProperty("app.notifications.email.global-hr-generic.enabled", "true");
+        for (long department = 1; department <= 5; department++) {
+            incident.setId(100L + department);
+            incident.setResponsibleDepartmentId(department);
+            incident.setIssueType(department == 2 ? IssueType.HR_ISSUE : IssueType.IT_ISSUE);
+            notifier.created(new IncidentCreated(number));
+            notifier.created(new IncidentCreated(number));
+        }
+        var messages = org.mockito.ArgumentCaptor.forClass(MimeMessage.class);
+        verify(sender, times(5)).send(messages.capture());
+        for (var message : messages.getAllValues()) {
+            var bytes = new ByteArrayOutputStream();
+            message.writeTo(bytes);
+            assertThat(bytes.toString(java.nio.charset.StandardCharsets.UTF_8))
+                    .doesNotContain(number, "Synthetic incident");
+        }
+        hr.setActive(false);
+        incident.setId(200L);
+        notifier.created(new IncidentCreated(number));
+        hr.setActive(true);
+        hr.setLastLoginAt(null);
+        incident.setId(201L);
+        notifier.created(new IncidentCreated(number));
+        when(accounts.findByEmail("hr@example.test")).thenReturn(Optional.empty());
+        incident.setId(202L);
+        notifier.created(new IncidentCreated(number));
+        verify(sender, times(5)).send(any(MimeMessage.class));
+        assertThat(jdbc.queryForObject("select count(*) from incident_department_head_email_receipt", Long.class)).isEqualTo(5);
+    }
     @Test void managedDepartmentMailAndLaterHeadGrantUseTheSameReceipt() throws Exception {
         incident.setResponsibleDepartmentId(3L);
         incident.setCreatedAt(java.time.LocalDateTime.parse("2026-11-05T00:00:00"));

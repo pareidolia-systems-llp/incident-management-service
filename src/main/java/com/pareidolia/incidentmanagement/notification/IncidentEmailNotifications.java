@@ -51,10 +51,49 @@ public final class IncidentEmailNotifications {
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT,fallbackExecution=false)
     public void created(IncidentCreated event) {
+        if (globalHrEnabled()) queueGlobalHr(event.incidentNumber());
         if (!settings.enabled() || environment.getProperty("app.incident-access.enabled", Boolean.class, false)
                 || environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false)) return;
         try {executor.execute(() -> deliver(event));}
         catch(RuntimeException failure) {LOG.warn("Incident email task was not queued.");}
+    }
+    private boolean globalHrEnabled() {
+        return settings.enabled() && verifiedRouting != null && departmentHeadReceipt != null
+                && environment.getProperty("app.incident-access.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.global-hr-generic.enabled", Boolean.class, false);
+    }
+
+    private void queueGlobalHr(String incidentNumber) {
+        try {
+            executor.execute(() -> {
+                try {
+                    boolean dev = environment.acceptsProfiles(Profiles.of("dev & !prod & !production & !default"));
+                    boolean production = environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
+                            && environment.getProperty("app.notifications.email.local-postfix-enabled", Boolean.class, false);
+                    if (!globalHrEnabled() || dev == production) return;
+                    String origin = environment.getProperty("app.notifications.email.portal-origin", "");
+                    if (IncidentEmailPortalLink.url(origin) == null) return;
+                    String from = address(settings.from());
+                    JavaMailSender sender = senders.getIfUnique();
+                    if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
+                    var allowlist = dev ? addresses(settings.devAllowlist()) : Set.<String>of();
+                    var content = IncidentEmailTemplate.renderMinimal(origin);
+                    for (var target : verifiedRouting.globalHrRecipients(incidentNumber).values()) {
+                        if (dev && !allowlist.contains(target.email())) continue;
+                        deliverWithReceipt(target, sender, from, content,
+                                () -> globalHrEnabled() && target.equals(
+                                        verifiedRouting.globalHrRecipients(incidentNumber).get(target.email())));
+                    }
+                } catch (RuntimeException failure) {
+                    LOG.warn("Generic HR notification authorization unavailable. Notification withheld.");
+                }
+            });
+        } catch (RuntimeException failure) {
+            LOG.warn("Generic HR notification task was not queued.");
+        }
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT, fallbackExecution=false)
     public void classificationReady(IncidentMailReady event) {
