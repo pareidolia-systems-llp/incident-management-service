@@ -1419,6 +1419,52 @@ class IncidentAssignmentWorkflowTests {
         login(reporter);assertThat(incidentService.validateIncident(incident.getId(),validation).getStatus()).isEqualTo(IncidentStatus.VALIDATED);assertThat(incidentService.closeIncident(incident.getId(),new CloseIncidentRequestDto()).getStatus()).isEqualTo(IncidentStatus.CLOSED);
         login(assigner);assertThatThrownBy(()->assignments.assign(incident.getId(),alternate.getId(),1L,1L,"Closed incident")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
     }
+    @Test
+    void completeGuardedLifecyclePreservesEvidenceFeedbackAndReview() throws Exception {
+        assertThat(incident.getStatus()).isEqualTo(IncidentStatus.OPEN);
+        login(reporter);
+        var screenshot = validScreenshot();
+        attachments.upload(incident.getId(), List.of(screenshot));
+        var attachment = attachments.list(incident.getId()).get(0);
+        assertThat(attachments.content(incident.getId(), attachment.id()).data()).isEqualTo(screenshot.getBytes());
+
+        standard();
+        grant(assigner.getId(), "MODIFY");
+        assignments.assign(incident.getId(), handler.getId(), 0L, 1L, "Synthetic assignment");
+        assertThat(incidents.findById(incident.getId()).orElseThrow().getStatus()).isEqualTo(IncidentStatus.ASSIGNED);
+        login(handler);
+        var investigation = new UpdateInvestigationRequestDto();
+        investigation.setInvestigationDetails("Synthetic investigation");
+        assertThat(incidentService.updateInvestigation(incident.getId(), investigation).getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        var resolution = new ResolveIncidentRequestDto();
+        resolution.setResolutionDetails("Synthetic first resolution");
+        assertThat(incidentService.resolveIncident(incident.getId(), resolution).getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+
+        login(reporter);
+        var feedback = new ResolutionFeedbackRequestDto();
+        feedback.setFeedback("Synthetic issue still persists");
+        assertThat(incidentService.submitResolutionFeedback(incident.getId(), feedback).getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        login(handler);
+        resolution.setResolutionDetails("Synthetic second resolution");
+        assertThat(incidentService.resolveIncident(incident.getId(), resolution).getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        login(reporter);
+        var validation = new ValidateIncidentRequestDto();
+        validation.setValidationDetails("Synthetic validation");
+        assertThat(incidentService.validateIncident(incident.getId(), validation).getStatus()).isEqualTo(IncidentStatus.VALIDATED);
+        assertThat(incidentService.closeIncident(incident.getId(), new CloseIncidentRequestDto()).getStatus()).isEqualTo(IncidentStatus.CLOSED);
+
+        login(assigner);
+        var review = new ReviewIncidentRequestDto();
+        review.setReviewDetails("Synthetic authorized review");
+        assertThat(incidentService.reviewIncident(incident.getId(), review).getStatus()).isEqualTo(IncidentStatus.CLOSED);
+        assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(incident.getId()))
+                .extracting(IncidentHistory::getActionType)
+                .contains(HistoryActionType.INCIDENT_CREATED, HistoryActionType.ATTACHMENT_ADDED,
+                        HistoryActionType.OWNER_ASSIGNED, HistoryActionType.INVESTIGATION_UPDATED,
+                        HistoryActionType.INCIDENT_RESOLVED, HistoryActionType.RESOLUTION_NOT_ACCEPTED,
+                        HistoryActionType.INCIDENT_VALIDATED, HistoryActionType.INCIDENT_CLOSED,
+                        HistoryActionType.INCIDENT_REVIEWED);
+    }
     @Test void legacyMissingClassificationRequiresTriageAndNeverInfersIdentityFromOwner(){
         db.update("delete from incident_assignment_state where incident_id=?",incident.getId());db.update("delete from incident_security_classification where incident_id=?",incident.getId());db.update("update incidents set assigned_owner=? where id=?",handler.getEmail(),incident.getId());
         assertThatThrownBy(() -> assignments.get(incident.getId())).isInstanceOf(ResponseStatusException.class);standard();assertThat(assignments.get(incident.getId()).handler()).isNull();assertThat(assignments.assign(incident.getId(),alternate.getId(),0L,1L,"Explicit legacy triage").handler().id()).isEqualTo(alternate.getId());assertThat(assignments.history(incident.getId()).get(0).previousHandlerId()).isNull();
