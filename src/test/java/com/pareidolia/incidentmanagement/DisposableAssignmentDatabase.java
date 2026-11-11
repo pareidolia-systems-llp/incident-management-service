@@ -21,17 +21,22 @@ final class DisposableAssignmentDatabase {
         }
         if (mysql()) {
             String token = System.getenv(PREFIX + "TOKEN");
+            boolean lockProof = "incident_security_coordination".equals(memoryName)
+                    && "jdbc:mysql://127.0.0.1:59455/incident_security_lock_disposable?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC".equals(url);
+            String schema = lockProof ? "incident_security_lock_disposable" : "incident_security_disposable";
+            String username = lockProof ? "security_lock_test" : "security_test";
             if (!"true".equals(System.getenv(PREFIX + "APPROVED")) || token == null
                     || !token.matches("[0-9a-f]{32}") || password == null || !password.matches("[0-9a-f]{64}")
-                    || !url.matches("jdbc:mysql://127\\.0\\.0\\.1:[0-9]{4,5}/incident_security_disposable\\?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC")) {
+                    || (!lockProof && !url.matches("jdbc:mysql://127\\.0\\.0\\.1:[0-9]{4,5}/incident_security_disposable\\?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"))) {
                 throw new IllegalStateException("Invalid disposable database configuration.");
             }
-            try (var connection = DriverManager.getConnection(url, "security_test", password);
-                 var query = connection.prepareStatement("select database(),version(),(select count(*) from information_schema.tables where table_schema=database()),token from disposable_run_marker");
+            try (var connection = DriverManager.getConnection(url, username, password);
+                 var query = connection.prepareStatement("select database(),version(),(select count(*) from information_schema.tables where table_schema=database()),token,@@server_uuid from disposable_run_marker");
                  var rows = query.executeQuery()) {
-                if (!rows.next() || !"incident_security_disposable".equals(rows.getString(1))
+                if (!rows.next() || !schema.equals(rows.getString(1))
                         || !rows.getString(2).startsWith("8.4.") || rows.getInt(3) != 1
-                        || !token.equals(rows.getString(4)) || rows.next()) {
+                        || !token.equals(rows.getString(4))
+                        || (lockProof && !"a6563759-ddb5-11f1-9b7c-6e0023da6ea2".equals(rows.getString(5))) || rows.next()) {
                     throw new IllegalStateException("Expected the empty, newly marked MySQL 8.4 schema.");
                 }
             } catch (SQLException ex) {
@@ -39,7 +44,7 @@ final class DisposableAssignmentDatabase {
             }
         }
         properties.add("spring.datasource.url", () -> mysql() ? url : "jdbc:h2:mem:" + memoryName + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
-        properties.add("spring.datasource.username", () -> mysql() ? "security_test" : "sa");
+        properties.add("spring.datasource.username", () -> mysql() ? ("incident_security_coordination".equals(memoryName) && url.contains("/incident_security_lock_disposable?") ? "security_lock_test" : "security_test") : "sa");
         properties.add("spring.datasource.password", () -> mysql() ? password : "");
         properties.add("spring.jpa.hibernate.ddl-auto", () -> mysql() ? "update" : "create-drop");
         properties.add("spring.jpa.show-sql", () -> "false");
