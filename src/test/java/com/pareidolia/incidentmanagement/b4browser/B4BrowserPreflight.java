@@ -76,7 +76,10 @@ public final class B4BrowserPreflight {
                                  AND table_name IN ('incident_department_head_email_receipt', 'incident_oversight_notification')),
                             (SELECT COUNT(*) FROM information_schema.tables
                                WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
-                                 AND table_name IN ('incident_department_mail_recipient', 'incident_department_mail_recipient_audit'))
+                                 AND table_name IN ('incident_department_mail_recipient', 'incident_department_mail_recipient_audit')),
+                            (SELECT COUNT(*) FROM information_schema.tables
+                               WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
+                                 AND table_name = 'incident_department_detail_email_receipt')
                      """)) {
             if (!result.next() || !DATABASE.equals(result.getString(1))
                     || !expectedServerId.equalsIgnoreCase(result.getString(2))
@@ -86,8 +89,10 @@ public final class B4BrowserPreflight {
             }
             int tables = result.getInt(5);
             int recipientTables = result.getInt(9);
-            boolean managedRecipientSchema = tables == 36 && recipientTables == 2;
-            if ((!managedRecipientSchema && (tables != 34 || recipientTables != 0)) || result.next()) {
+            int detailReceiptTables = result.getInt(10);
+            boolean managedRecipientSchema = recipientTables == 2
+                    && ((tables == 36 && detailReceiptTables == 0) || (tables == 37 && detailReceiptTables == 1));
+            if ((!managedRecipientSchema && (tables != 34 || recipientTables != 0 || detailReceiptTables != 0)) || result.next()) {
                 throw new IllegalStateException("B4 disposable database identity or schema verification failed.");
             }
             return managedRecipientSchema;

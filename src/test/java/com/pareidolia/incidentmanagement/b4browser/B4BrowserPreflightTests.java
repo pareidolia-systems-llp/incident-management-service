@@ -66,7 +66,7 @@ class B4BrowserPreflightTests {
         assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "22222222-2222-2222-2222-222222222222"))
                 .isInstanceOf(IllegalStateException.class);
         verify(statement, times(2)).executeQuery(argThat(sql -> sql.contains("incident_department_head_email_receipt")
-                && sql.contains("incident_oversight_notification")));
+                && sql.contains("incident_oversight_notification") && sql.contains("incident_department_detail_email_receipt")));
 
         when(result.next()).thenReturn(true, false);
         when(result.getInt(8)).thenReturn(1);
@@ -82,6 +82,25 @@ class B4BrowserPreflightTests {
         when(result.getInt(9)).thenReturn(2);
         assertThat(B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111")).isTrue();
         when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(37);
+        when(result.getInt(10)).thenReturn(1);
+        assertThat(B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111")).isTrue();
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(10)).thenReturn(0);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
+                .isInstanceOf(IllegalStateException.class);
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(36);
+        when(result.getInt(10)).thenReturn(1);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
+                .isInstanceOf(IllegalStateException.class);
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(38);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
+                .isInstanceOf(IllegalStateException.class);
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(36);
+        when(result.getInt(10)).thenReturn(0);
         when(result.getInt(9)).thenReturn(1);
         assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
                 .isInstanceOf(IllegalStateException.class);
