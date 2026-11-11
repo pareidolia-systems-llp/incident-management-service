@@ -28,6 +28,12 @@ public final class IncidentEmailNotifications {
     private final VerifiedIncidentMailRouting verifiedRouting;
     private HrReassignmentReferralService hrReferrals;
     private DepartmentHeadMailReceipt departmentHeadReceipt;
+    private DepartmentDetailMailReceipt departmentDetailReceipt;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void departmentDetailReceipt(DepartmentDetailMailReceipt receipt) {
+        this.departmentDetailReceipt = receipt;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void departmentHeadReceipt(DepartmentHeadMailReceipt receipt) {
@@ -115,7 +121,11 @@ public final class IncidentEmailNotifications {
                     boolean production = environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
                             && environment.getProperty("app.notifications.email.local-postfix-enabled", Boolean.class, false);
                     if (dev != production && environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())) {
-                        if (grantedRecipient == null) deliverVerified(incidentNumber, dev, production);
+                        if (grantedRecipient == null) {
+                            deliverVerified(incidentNumber, dev, production);
+                        } else if (detailedDeliveryEnabled()) {
+                            deliverGrantedDepartmentDetail(incidentNumber, grantedRecipient, dev, production);
+                        }
                         deliverDepartmentHeads(incidentNumber, grantedRecipient, dev, production);
                     }
                 } catch (RuntimeException failure) {
@@ -274,7 +284,8 @@ public final class IncidentEmailNotifications {
             if (managed) {
                 var target = verifiedRouting.managedRecipient(incidentNumber, recipient);
                 if (target != null) {
-                    deliverWithReceipt(target, sender, from, content,
+                    if (detailedMailEnabled()) deliverDetailed(incidentNumber, target, sender, from, origin);
+                    else deliverWithReceipt(target, sender, from, content,
                             () -> target.equals(verifiedRouting.managedRecipient(incidentNumber, recipient)));
                 }
                 continue;
@@ -303,11 +314,64 @@ public final class IncidentEmailNotifications {
         for (var head : candidates.values()) {
             if ((grantedRecipient != null && grantedRecipient != head.userId())
                     || (dev && !allowlist.contains(head.email()))) continue;
-            deliverWithReceipt(head, sender, from, content,
+            if (detailedMailEnabled()) deliverDetailed(incidentNumber, head, sender, from, origin);
+            else deliverWithReceipt(head, sender, from, content,
                     () -> head.equals(verifiedRouting.headRecipients(incidentNumber).get(head.userId())));
         }
     }
 
+    private boolean detailedDeliveryEnabled() {
+        return settings.enabled() && detailedMailEnabled() && verifiedRouting != null
+                && environment.getProperty("app.notifications.email.enabled", Boolean.class, false)
+                && environment.getProperty("app.incident-access.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)
+                && environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false);
+    }
+
+    private void deliverGrantedDepartmentDetail(String incidentNumber, long grantedRecipient,
+            boolean dev, boolean production) {
+        if (!detailedDeliveryEnabled()) return;
+        String origin = environment.getProperty("app.notifications.email.portal-origin", "");
+        if (IncidentEmailPortalLink.url(origin) == null) return;
+        String from = address(settings.from());
+        JavaMailSender sender = senders.getIfUnique();
+        if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
+        Set<String> allowlist = dev ? addresses(settings.devAllowlist()) : Set.of();
+        for (String address : verifiedRouting.recipients(incidentNumber)) {
+            if (dev && !allowlist.contains(address)) continue;
+            var target = verifiedRouting.managedRecipient(incidentNumber, address);
+            if (target != null && target.userId() == grantedRecipient) {
+                deliverDetailed(incidentNumber, target, sender, from, origin);
+            }
+        }
+    }
+    private boolean detailedMailEnabled() {
+        return departmentDetailReceipt != null
+                && environment.getProperty("app.notifications.email.detailed-department.enabled", Boolean.class, false);
+    }
+
+    private void deliverDetailed(String incidentNumber, VerifiedIncidentMailRouting.Recipient target,
+            JavaMailSender sender, String from, String origin) {
+        if (!detailedDeliveryEnabled() || verifiedRouting.detailedMessage(incidentNumber, target) == null) return;
+        try {
+            departmentDetailReceipt.claim(target.incidentId(), target.userId());
+        } catch (org.springframework.dao.DuplicateKeyException duplicate) {
+            return;
+        }
+        if (!detailedDeliveryEnabled()) return;
+        var current = verifiedRouting.detailedMessage(incidentNumber, target);
+        if (current == null) return;
+        boolean sent = false;
+        try {
+            var content = IncidentEmailTemplate.renderDetailedIncident(current.event(), origin, target.incidentId());
+            sendMinimal(sender, from, target.email(), content);
+            sent = true;
+        } catch (Exception failure) {
+            LOG.warn("Detailed incident email delivery is uncertain.");
+        } finally {
+            departmentDetailReceipt.finish(target.incidentId(), target.userId(), sent);
+        }
+    }
     private void deliverWithReceipt(VerifiedIncidentMailRouting.Recipient target, JavaMailSender sender,
             String from, IncidentEmailTemplate.Rendered content, java.util.function.BooleanSupplier stillAuthorized) {
         try {

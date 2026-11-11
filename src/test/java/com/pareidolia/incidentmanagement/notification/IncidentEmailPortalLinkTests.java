@@ -50,6 +50,21 @@ class IncidentEmailPortalLinkTests {
                 .doesNotContain("private title","private reporter","private department");
         assertThat(IncidentEmailTemplate.render(new IncidentCreated(null),false,"https://portal.example.test").html()).contains("Not provided");
     }
+    @Test void detailedIncidentLinkUsesPersistedIdAndEscapesContent() {
+        var event = new IncidentCreated("INC-SYNTHETIC", "<script>title</script>", "reporter@example.test",
+                "R&D", com.pareidolia.incidentmanagement.enums.IssueType.IT_ISSUE,
+                com.pareidolia.incidentmanagement.enums.Severity.LOW,
+                com.pareidolia.incidentmanagement.enums.Priority.HIGH,
+                java.time.LocalDateTime.parse("2026-11-11T10:00:00"), "Synthetic <private>",
+                null, com.pareidolia.incidentmanagement.enums.IncidentStatus.OPEN,
+                java.time.LocalDateTime.parse("2026-11-11T10:00:00"), "Network", null, null, "IT");
+        var rendered = IncidentEmailTemplate.renderDetailedIncident(event, "https://portal.example.test", 42);
+        assertThat(rendered.html()).contains("https://portal.example.test/incidents/42", "View Incident in Portal",
+                "&lt;script&gt;title&lt;/script&gt;", "Synthetic &lt;private&gt;", "Network", "IT")
+                .doesNotContain("<script>title</script>", "Synthetic <private>");
+        assertThat(rendered.plainText()).contains("https://portal.example.test/incidents/42",
+                "reporter@example.test", "R&D", "Network");
+    }
     static class Capture extends JavaMailSenderImpl {
         final List<MimeMessage> messages = new ArrayList<>();
         @Override public void send(MimeMessage message) { messages.add(message); }

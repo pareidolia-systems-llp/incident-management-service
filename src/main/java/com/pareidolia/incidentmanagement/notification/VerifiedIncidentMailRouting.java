@@ -73,6 +73,27 @@ class VerifiedIncidentMailRouting {
             return authorized;
         });
     }
+    record DetailedMessage(Recipient recipient, IncidentCreated event) { }
+
+    DetailedMessage detailedMessage(String incidentNumber, Recipient expected) {
+        if (!policy.isEnabled() || !usesManagedRecipients()) return null;
+        return snapshot.read(() -> {
+            Recipients current = resolve(incidentNumber);
+            boolean routed = expected.equals(current.department().get(expected.email()))
+                    || expected.equals(current.heads().get(expected.userId()));
+            if (!routed || incidents.countActiveCaseViewGrants(expected.incidentId(), expected.userId()) != 1) return null;
+            Incident incident = incidents.findByIncidentNumber(incidentNumber).orElse(null);
+            if (incident == null || !java.util.Objects.equals(expected.incidentId(), incident.getId())) return null;
+            String department = incidents.findActiveResponsibleDepartmentName(incident.getResponsibleDepartmentId()).orElse(null);
+            if (department == null) return null;
+            var event = new IncidentCreated(incident.getIncidentNumber(), incident.getTitle(),
+                    incident.getReportedBy(), incident.getReporterDepartment(), incident.getIssueType(),
+                    incident.getSeverity(), incident.getPriority(), incident.getReportedAt(), incident.getDescription(),
+                    incident.getAssignedOwner(), incident.getStatus(), incident.getCreatedAt(), incident.getCategory(),
+                    incident.getAffectedSystem(), incident.getImpactedUserOrDepartment(), department);
+            return new DetailedMessage(expected, event);
+        });
+    }
     Recipient managedRecipient(String incidentNumber, String address) {
         return resolveCurrent(incidentNumber).department().get(address);
     }

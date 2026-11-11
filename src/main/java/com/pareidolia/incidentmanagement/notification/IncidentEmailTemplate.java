@@ -38,6 +38,7 @@ final class IncidentEmailTemplate {
                 {"Reported department", clean(event.reporterDepartment(), 255)},
                 {"Status", clean(String.valueOf(event.status()), 255)},
                 {"Issue type", clean(String.valueOf(event.issueType()), 255)},
+                {"Category", clean(event.category(), 255)},
                 {"Severity", clean(String.valueOf(event.severity()), 255)},
                 {"Priority", clean(String.valueOf(event.priority()), 255)},
                 {"Created at", clean(String.valueOf(event.createdAt()), 255)}
@@ -72,6 +73,16 @@ final class IncidentEmailTemplate {
             +"<p style=\"margin:20px 0 0;line-height:1.5\">Sign in to the incident management portal to review it.</p>"
             +portalLink+"</td></tr></table></td></tr></table></body></html>";
         return new Rendered(subject,plain.toString(),html);
+    }
+    static Rendered renderDetailedIncident(IncidentCreated event, String portalOrigin, long incidentId) {
+        String base = IncidentEmailPortalLink.url(portalOrigin);
+        if (base == null || incidentId <= 0) throw new IllegalArgumentException("Valid portal and incident are required.");
+        String direct = base + "incidents/" + incidentId;
+        Rendered message = render(event, true, portalOrigin, event.responsibleDepartmentName());
+        return new Rendered(message.subject(),
+                message.plainText().replace("Open Incident Management Portal: " + base, "View Incident in Portal: " + direct),
+                message.html().replace(HtmlUtils.htmlEscape(base), HtmlUtils.htmlEscape(direct))
+                        .replace("Open Incident Management Portal", "View Incident in Portal"));
     }
     static Rendered renderMinimal(String portalOrigin) {
         return render(null, false, portalOrigin);
