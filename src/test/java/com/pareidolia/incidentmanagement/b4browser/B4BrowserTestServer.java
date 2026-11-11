@@ -22,9 +22,14 @@ import javax.sql.DataSource;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.boot.SpringApplication;
+import org.springframework.boot.context.TypeExcludeFilter;
+import org.springframework.boot.test.context.TestComponent;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.core.type.filter.AnnotationTypeFilter;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -44,6 +49,7 @@ public final class B4BrowserTestServer {
             if (!(context instanceof GenericApplicationContext registry)) {
                 throw new IllegalStateException("Unexpected B4 browser application context.");
             }
+            registry.registerBean("b4TestComponentExclusion", TestComponentExclusion.class);
             registry.registerBean("b4FixtureAuthenticationSuccessHandler", GoogleAuthenticationSuccessHandler.class,
                     () -> new FixtureAuthenticationSuccessHandler(context.getBean(AppUserService.class), settings.fixtureEmails()),
                     definition -> definition.setPrimary(true));
@@ -96,6 +102,26 @@ public final class B4BrowserTestServer {
         app.run();
     }
 
+    // The standalone launcher does not get Spring Boot's test context scan filters.
+    static final class TestComponentExclusion extends TypeExcludeFilter {
+        private final AnnotationTypeFilter testComponent = new AnnotationTypeFilter(TestComponent.class);
+
+        @Override
+        public boolean match(MetadataReader reader, MetadataReaderFactory factory) throws IOException {
+            return testComponent.match(reader, factory);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof TestComponentExclusion;
+        }
+
+        @Override
+        public int hashCode() {
+            return TestComponentExclusion.class.hashCode();
+        }
+    }
+
     static StandardEnvironment isolatedEnvironment(B4BrowserPreflight.Settings settings) {
         // Never inherit arbitrary Spring datasource, profile, mail or config overrides.
         var environment = new StandardEnvironment();
@@ -115,10 +141,7 @@ public final class B4BrowserTestServer {
                 Map.entry("app.incident-assignment.enabled", "true"),
                 Map.entry("app.employee-management.enabled", "true"),
                 Map.entry("app.employee-assignment.active-email-search.enabled", "true"),
-                Map.entry(
-                        "app.employee-management.allowed-emails",
-                        settings.fixtureEmails().get(0)
-                ),
+                Map.entry("app.employee-management.allowed-emails", ""),
                 Map.entry("app.auth.bootstrap-admin-emails", ""),
                 Map.entry("app.auth.bootstrap-it-handler-emails", ""),
                 Map.entry("app.notifications.email.enabled", "false"),
@@ -136,7 +159,7 @@ public final class B4BrowserTestServer {
                 "INCIDENT_ASSIGNMENT_ALLOWED_PAIRS", "INCIDENT_HR_ACCOUNT_IDS", "INCIDENT_HR_DEPARTMENT_IDS",
                 "INCIDENT_TRANSFER_ALLOWED_COORDINATOR_ROUTES", "INCIDENT_TRANSFER_ALLOWED_HANDOFF_REVIEWER_ROUTES",
                 "INCIDENT_TRANSFER_HANDOFF_APPROVED", "DEPARTMENT_MEMBERSHIP_ADMIN_ENABLED",
-                "DEPARTMENT_MEMBERSHIP_ADMIN_ALLOWED_EMAILS", "app.employee-management.allowed-emails",
+                "DEPARTMENT_MEMBERSHIP_ADMIN_ALLOWED_EMAILS",
                 "app.department-head-designations.enabled", "app.handler-eligibility-admin.enabled",
                 "app.handler-eligibility-admin.allowed-emails",
                 "app.incident-security-admin.enabled", "app.incident-capability-admin.allowed-emails",

@@ -8,6 +8,9 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.boot.context.TypeExcludeFilter;
+import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.core.Authentication;
@@ -85,7 +88,23 @@ class B4BrowserPreflightTests {
     }
 
     @Test
+    void standaloneComponentScanExcludesTestConfigurationAndKeepsRealUserService() {
+        var scanner = new ClassPathScanningCandidateComponentProvider(true);
+        var beanFactory = new DefaultListableBeanFactory();
+        beanFactory.registerSingleton("b4TestComponentExclusion", new B4BrowserTestServer.TestComponentExclusion());
+        var bootFilter = new TypeExcludeFilter();
+        bootFilter.setBeanFactory(beanFactory);
+        scanner.addExcludeFilter(bootFilter);
+
+        assertThat(scanner.findCandidateComponents("com.pareidolia.incidentmanagement"))
+                .extracting(candidate -> candidate.getBeanClassName())
+                .contains(AppUserService.class.getName())
+                .doesNotContain("com.pareidolia.incidentmanagement.AuthenticationFlowTests$Config");
+    }
+
+    @Test
     void ignoresAmbientSpringDatasourceAndMailOverrides() {
+        String previousEmployeeAllowlist = System.setProperty("app.employee-management.allowed-emails", REPORTER);
         System.setProperty("spring.application.json", "{\"app.notifications.email.enabled\":true}");
         System.setProperty("spring.datasource.hikari.jdbc-url", "jdbc:mysql://other.invalid/example");
         try {
@@ -95,10 +114,13 @@ class B4BrowserPreflightTests {
             assertThat(environment.getProperty("spring.datasource.url")).isEqualTo(settings.url());
             assertThat(environment.getProperty("spring.datasource.hikari.jdbc-url")).isNull();
             assertThat(environment.getProperty("spring.application.json")).isNull();
+            assertThat(environment.getProperty("app.employee-management.allowed-emails")).isEmpty();
             assertThat(environment.getProperty("app.notifications.email.enabled")).isEqualTo("false");
             assertThat(environment.getProperty("app.employee-assignment.active-email-search.enabled")).isEqualTo("true");
             assertThat(environment.getProperty("server.address")).isEqualTo("127.0.0.1");
         } finally {
+            if (previousEmployeeAllowlist == null) System.clearProperty("app.employee-management.allowed-emails");
+            else System.setProperty("app.employee-management.allowed-emails", previousEmployeeAllowlist);
             System.clearProperty("spring.application.json");
             System.clearProperty("spring.datasource.hikari.jdbc-url");
         }

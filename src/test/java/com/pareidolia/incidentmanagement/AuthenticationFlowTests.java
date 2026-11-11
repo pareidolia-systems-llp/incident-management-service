@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Import;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -45,7 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // Real application security filter chain, local MVC only: no database or Google calls.
 @SpringJUnitWebConfig(AuthenticationFlowTests.Config.class)
 class AuthenticationFlowTests {
-    @Configuration
+    @TestConfiguration
     @EnableWebMvc
     @Import({SecurityConfig.class, AuthController.class,
             com.pareidolia.incidentmanagement.controller.WorkLogController.class,
