@@ -50,7 +50,7 @@ class IncidentAssignmentWorkflowTests {
         DisposableAssignmentDatabase.configure(registry, "functional_assignment");
     }
     @Autowired JdbcTemplate db;@Autowired javax.sql.DataSource source;@Autowired AppUserRepository users;@Autowired IncidentRepository incidents;
-    @Autowired IncidentService incidentService;@Autowired IncidentAssignmentService assignments;@Autowired IncidentSecurityAdministrationService administration;
+    @Autowired AppUserService appUserService;@Autowired IncidentService incidentService;@Autowired IncidentAssignmentService assignments;@Autowired IncidentSecurityAdministrationService administration;
     @Autowired IncidentSecurityGate gate;@Autowired IncidentReadSnapshot snapshot;@Autowired IncidentHistoryRepository history;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     @Autowired com.pareidolia.incidentmanagement.service.IncidentAttachmentService attachments;
@@ -1222,6 +1222,39 @@ class IncidentAssignmentWorkflowTests {
         assertThat(detail.getReporterDepartment()).isEqualTo("R&D");
         assertThat(detail.getResponsibleDepartmentId()).isEqualTo(71L);
         assertThat(detail.getResponsibleDepartmentName()).isEqualTo("IT");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "71, IT", "72, HR", "73, Operations (Annotation)",
+            "74, Operations (Perioperative Flow Analysis)", "75, R&D"
+    })
+    void guardedIntakeListsAndPersistsEachApprovedDepartment(long id, String name) {
+        db.update("""
+                insert into employee_departments(id,display_name,active) values
+                    (73,'Operations (Annotation)',1),(74,'Operations (Perioperative Flow Analysis)',1),
+                    (75,'R&D',1),(76,'Inactive department',0),(77,'Unapproved department',1)
+                """);
+        var controller = new com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController(
+                incidents, appUserService, incidentService);
+        assertThat(controller.list()).extracting(
+                com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController.Department::displayName)
+                .containsExactlyInAnyOrder("IT", "HR", "Operations (Annotation)", "Operations (Perioperative Flow Analysis)", "R&D");
+        assertThat(controller.list()).contains(new com.pareidolia.incidentmanagement.controller.ResponsibleDepartmentController.Department(id, name));
+        var request = request(null);
+        request.setResponsibleDepartmentId(id);
+        if ("HR".equals(name)) request.setIssueType(IssueType.HR_ISSUE);
+        var created = incidentService.createIncident(request);
+        assertThat(incidents.findById(created.getId()).orElseThrow().getResponsibleDepartmentId()).isEqualTo(id);
+    }
+
+    @Test
+    void guardedIntakeRejectsAnActiveDepartmentOutsideTheApprovedList() {
+        db.update("insert into employee_departments(id,display_name,active) values (77,'Unapproved department',1)");
+        var request = request(null);
+        request.setResponsibleDepartmentId(77L);
+        assertThatThrownBy(() -> incidentService.createIncident(request))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.InvalidRequestException.class);
     }
 
     @Test

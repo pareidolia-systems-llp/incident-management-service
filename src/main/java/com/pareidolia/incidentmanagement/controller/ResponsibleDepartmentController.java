@@ -3,6 +3,7 @@ package com.pareidolia.incidentmanagement.controller;
 import com.pareidolia.incidentmanagement.repository.IncidentRepository;
 import com.pareidolia.incidentmanagement.service.AppUserService;
 import com.pareidolia.incidentmanagement.service.IncidentService;
+import com.pareidolia.incidentmanagement.service.ResponsibleDepartments;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -26,7 +27,8 @@ public class ResponsibleDepartmentController {
         users.getAuthenticatedUser();
         if (!incidentService.departmentScopedIntakeAvailable()) return List.of();
         return incidents.findActiveResponsibleDepartments().stream()
-                .map(row -> new Department(row.getId(), row.getDisplayName()))
+                .filter(row -> ResponsibleDepartments.includes(row.getDisplayName()))
+                .map(row -> new Department(row.getId(), ResponsibleDepartments.displayName(row.getDisplayName())))
                 .toList();
     }
 }

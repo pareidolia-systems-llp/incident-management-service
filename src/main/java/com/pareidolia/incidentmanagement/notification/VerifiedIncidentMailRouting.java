@@ -39,15 +39,23 @@ class VerifiedIncidentMailRouting {
         this.environment = environment;
     }
 
-    record HeadRecipient(long incidentId, long userId, String email) { }
-    private record Recipients(Set<String> department, Map<Long, HeadRecipient> heads) { }
-    private static final Recipients NONE = new Recipients(Set.of(), Map.of());
+    record Recipient(long incidentId, long userId, String email) { }
+    private record Recipients(Map<String, Recipient> department, Map<Long, Recipient> heads) { }
+    private static final Recipients NONE = new Recipients(Map.of(), Map.of());
 
     Set<String> recipients(String incidentNumber) {
-        return resolveCurrent(incidentNumber).department();
+        return resolveCurrent(incidentNumber).department().keySet();
     }
 
-    Map<Long, HeadRecipient> headRecipients(String incidentNumber) {
+    boolean usesManagedRecipients() {
+        return environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false);
+    }
+
+    Recipient managedRecipient(String incidentNumber, String address) {
+        return resolveCurrent(incidentNumber).department().get(address);
+    }
+
+    Map<Long, Recipient> headRecipients(String incidentNumber) {
         return resolveCurrent(incidentNumber).heads();
     }
 
@@ -57,6 +65,8 @@ class VerifiedIncidentMailRouting {
     }
 
     private Recipients resolve(String incidentNumber) {
+        boolean managed = usesManagedRecipients();
+        if (managed && !policy.isEnabled()) return NONE;
         Incident incident = incidents.findByIncidentNumber(incidentNumber).orElse(null);
         if (incident == null) return NONE;
         var classifications = incidents.findSecurityClassifications(List.of(incident.getId()));
@@ -71,16 +81,20 @@ class VerifiedIncidentMailRouting {
         if (responsible != null && responsibleName == null) return NONE;
         boolean hr = policy.isHrCase(incident, responsibleName);
         boolean restricted = hr || "RESTRICTED".equals(row[1]) || IncidentConfidentiality.requiresRestriction(incident, responsibleName);
-        Long department = hr ? environment.getProperty(PREFIX + "hr-department-id", Long.class)
+        Long department = managed ? responsible
+                : hr ? environment.getProperty(PREFIX + "hr-department-id", Long.class)
                 : responsible != null ? responsible
                 : restricted ? null : environment.getProperty(PREFIX + "it-department-id", Long.class);
         if (department == null || department <= 0) return NONE;
         String destinationName = incidents.findActiveResponsibleDepartmentName(department).orElse(null);
         if (destinationName == null || hr != policy.isHrDepartment(department, destinationName)) return NONE;
 
-        Set<String> addresses = matrix(department, "department-recipients");
+        Set<String> addresses = managed ? new LinkedHashSet<>(jdbc.queryForList("""
+                select email from incident_department_mail_recipient
+                where department_id=? and active=true order by email
+                """, String.class, department)) : matrix(department, "department-recipients");
         if (restricted) addresses.retainAll(matrix(department, "restricted-recipients"));
-        var heads = new LinkedHashMap<Long, HeadRecipient>();
+        var heads = new LinkedHashMap<Long, Recipient>();
         if (policy.isEnabled() && department.equals(responsible)
                 && environment.getProperty(PREFIX + "department-head-notifications.enabled", Boolean.class, false)
                 && afterRollout(incident)
@@ -95,18 +109,19 @@ class VerifiedIncidentMailRouting {
                             addresses.remove(email);
                             if (policy.allowsHrOperations(account, incident)
                                     && incidents.countActiveCaseViewGrants(incident.getId(), account.getId()) == 1) {
-                                heads.put(account.getId(), new HeadRecipient(incident.getId(), account.getId(), email));
+                                heads.put(account.getId(), new Recipient(incident.getId(), account.getId(), email));
                             }
                         });
             }
         }
-        var authorized = new LinkedHashSet<String>();
+        var authorized = new LinkedHashMap<String, Recipient>();
         for (String address : addresses) {
             accounts.findByEmail(address).filter(account -> Boolean.TRUE.equals(account.getActive())
+                    && (!managed || (account.getLastLoginAt() != null && address.equals(account.getEmail())))
                     && activeMember(department, account.getId())
                     && policy.allowsHrOperations(account, incident)
                     && (!restricted || incidents.countActiveCaseViewGrants(incident.getId(), account.getId()) == 1))
-                    .ifPresent(account -> authorized.add(address));
+                    .ifPresent(account -> authorized.put(address, new Recipient(incident.getId(), account.getId(), address)));
         }
         return new Recipients(authorized, heads);
     }

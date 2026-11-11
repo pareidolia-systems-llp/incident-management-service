@@ -51,7 +51,9 @@ public final class B4BrowserTestServer {
                     FixtureAuthenticationFailureHandler::new, definition -> definition.setPrimary(true));
             registry.registerBean("b4BrowserWiringCheck", SmartInitializingSingleton.class, () -> () -> {
                 try (var connection = context.getBean(DataSource.class).getConnection()) {
-                    B4BrowserPreflight.verifyDatabase(connection, settings.serverId());
+                    if (B4BrowserPreflight.verifyDatabase(connection, settings.serverId()) != settings.managedRecipientSchema()) {
+                        throw new IllegalStateException("B4 runtime recipient schema differs from preflight.");
+                    }
                 } catch (SQLException failure) {
                     throw new IllegalStateException("B4 runtime datasource verification failed.");
                 }
@@ -124,6 +126,8 @@ public final class B4BrowserTestServer {
                 Map.entry("app.notifications.email.hr-referrals.enabled", "false"),
                 Map.entry("app.notifications.email.local-postfix-enabled", "false"),
                 Map.entry("app.notifications.email.verified-department-routing.enabled", "false"),
+                Map.entry("app.notifications.email.managed-recipients.enabled", "false"),
+                Map.entry("app.notifications.email.recipient-administration.enabled", settings.managedRecipientSchema()),
                 Map.entry("app.frontend-url", FRONTEND),
                 Map.entry("app.cors.allowed-origins", FRONTEND),
                 Map.entry("spring.security.oauth2.client.registration.google.redirect-uri",

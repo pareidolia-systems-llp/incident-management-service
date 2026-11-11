@@ -109,6 +109,7 @@ public class IncidentServiceImpl implements IncidentService {
                 throw new InvalidRequestException("Select an active responsible department.");
             }
             responsibleDepartmentName = incidentRepository.lockActiveResponsibleDepartmentName(departmentId)
+                    .filter(com.pareidolia.incidentmanagement.service.ResponsibleDepartments::includes)
                     .orElseThrow(() -> new InvalidRequestException("Select an active responsible department."));
         }
 

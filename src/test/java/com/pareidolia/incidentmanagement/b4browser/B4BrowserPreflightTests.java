@@ -74,6 +74,14 @@ class B4BrowserPreflightTests {
         when(result.getInt(5)).thenReturn(32);
         assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
                 .isInstanceOf(IllegalStateException.class);
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(36);
+        when(result.getInt(9)).thenReturn(2);
+        assertThat(B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111")).isTrue();
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(9)).thenReturn(1);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -82,7 +90,7 @@ class B4BrowserPreflightTests {
         System.setProperty("spring.datasource.hikari.jdbc-url", "jdbc:mysql://other.invalid/example");
         try {
             var settings = new B4BrowserPreflight.Settings("jdbc:mysql://127.0.0.1:59450/incident_security_disposable",
-                    "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER));
+                    "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER), false);
             var environment = B4BrowserTestServer.isolatedEnvironment(settings);
             assertThat(environment.getProperty("spring.datasource.url")).isEqualTo(settings.url());
             assertThat(environment.getProperty("spring.datasource.hikari.jdbc-url")).isNull();
@@ -97,6 +105,16 @@ class B4BrowserPreflightTests {
     }
 
     @Test
+    void allowsRecipientAdministrationOnlyWithCompleteSchemaAndStillDisablesMail() {
+        var settings = new B4BrowserPreflight.Settings("jdbc:mysql://127.0.0.1:59450/incident_security_disposable",
+                "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER), true);
+        var environment = B4BrowserTestServer.isolatedEnvironment(settings);
+        assertThat(environment.getProperty("app.notifications.email.recipient-administration.enabled", Boolean.class)).isTrue();
+        assertThat(environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class)).isFalse();
+        assertThat(environment.getProperty("app.notifications.email.enabled", Boolean.class)).isFalse();
+    }
+
+    @Test
     void forwardsExplicitDepartmentAdministrationOptIns() {
         var aliases = java.util.Map.of(
                 "APP_DEPARTMENT_HEAD_DESIGNATIONS_ENABLED", "true",
@@ -106,7 +124,7 @@ class B4BrowserPreflightTests {
         aliases.forEach((key, value) -> previous.put(key, System.setProperty(key, value)));
         try {
             var settings = new B4BrowserPreflight.Settings("jdbc:mysql://127.0.0.1:59450/incident_security_disposable",
-                    "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER));
+                    "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER), false);
             var environment = B4BrowserTestServer.isolatedEnvironment(settings);
             assertThat(environment.getProperty("app.department-head-designations.enabled")).isEqualTo("true");
             assertThat(environment.getProperty("app.handler-eligibility-admin.enabled")).isEqualTo("true");

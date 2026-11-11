@@ -69,6 +69,79 @@ class VerifiedIncidentMailRoutingTests {
         assertThat(routing.recipients(number)).isEmpty();
     }
 
+    @Test void managedRecipientsUseTheSelectedDepartmentAndRequireCurrentIdentityAndCaseAuthorization() {
+        env.setProperty("app.notifications.email.managed-recipients.enabled", "true");
+        incident.setResponsibleDepartmentId(3L);
+        when(db.queryForList(contains("incident_department_mail_recipient"), eq(String.class), eq(3L)))
+                .thenReturn(List.of("ops@example.test", "ops@example.test", "it@example.test"));
+        assertThat(routing.recipients(number)).isEmpty();
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        assertThat(routing.recipients(number)).isEmpty();
+        accounts.findByEmail("it@example.test").orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        accounts.findByEmail("ops@example.test").orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        assertThat(routing.recipients(number)).containsExactly("ops@example.test");
+
+        incident.setIssueType(IssueType.HR_ISSUE);
+        classification("RESTRICTED");
+        assertThat(routing.recipients(number)).isEmpty();
+        incident.setResponsibleDepartmentId(2L);
+        when(db.queryForList(contains("incident_department_mail_recipient"), eq(String.class), eq(2L)))
+                .thenReturn(List.of("hr@example.test"));
+        accounts.findByEmail("hr@example.test").orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        assertThat(routing.recipients(number)).isEmpty();
+        when(incidents.countActiveCaseViewGrants(9L, 12L)).thenReturn(1L);
+        assertThat(routing.recipients(number)).containsExactly("hr@example.test");
+        when(db.queryForList(contains("incident_department_mail_recipient"), eq(String.class), eq(2L)))
+                .thenReturn(List.of());
+        assertThat(routing.recipients(number)).isEmpty();
+    }
+
+    @Test void managedDepartmentMailAndLaterHeadGrantUseTheSameReceipt() throws Exception {
+        incident.setResponsibleDepartmentId(3L);
+        incident.setCreatedAt(java.time.LocalDateTime.parse("2026-11-05T00:00:00"));
+        env.setActiveProfiles("dev");
+        env.setProperty("app.incident-access.enabled", "true");
+        env.setProperty("app.notifications.email.managed-recipients.enabled", "true");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        env.setProperty(PREFIX + "enabled", "true");
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        accounts.findByEmail("ops@example.test").orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        when(db.queryForList(contains("incident_department_mail_recipient"), eq(String.class), eq(3L)))
+                .thenReturn(List.of("ops@example.test"));
+
+        var jdbc = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:managed_receipts;DB_CLOSE_DELAY=-1", "sa", ""));
+        jdbc.execute("""
+                create table incident_department_head_email_receipt (
+                    incident_id bigint, recipient_user_id bigint, status varchar(10), finished_at timestamp,
+                    primary key (incident_id, recipient_user_id))
+                """);
+        @SuppressWarnings("unchecked") ObjectProvider<JavaMailSender> provider = mock(ObjectProvider.class);
+        var sender = mock(JavaMailSender.class);
+        when(provider.getIfUnique()).thenReturn(sender);
+        when(sender.createMimeMessage()).thenAnswer(call -> new MimeMessage(Session.getInstance(new Properties())));
+        var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test", "", "", "ops@example.test");
+        var notifier = new IncidentEmailNotifications(settings, env, provider, Runnable::run,
+                new IncidentEmailDetailPolicy(env, java.util.stream.Stream::empty), routing);
+        notifier.departmentHeadReceipt(new DepartmentHeadMailReceipt(jdbc));
+
+        notifier.classificationReady(new IncidentMailReady(number));
+        env.setProperty(PREFIX + "department-head-notifications.enabled", "true");
+        env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-04T00:00:00");
+        env.setProperty(PREFIX + "department-head-recipients", "3=ops@example.test");
+        when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(3L), eq(13L))).thenReturn(1);
+        when(incidents.countActiveCaseViewGrants(9L, 13L)).thenReturn(1L);
+        assertThat(headEmails()).containsExactly("ops@example.test");
+        notifier.departmentHeadViewGranted(new DepartmentHeadViewGranted(number, 13L));
+        notifier.classificationReady(new IncidentMailReady(number));
+
+        verify(sender, times(1)).send(any(MimeMessage.class));
+        assertThat(jdbc.queryForList("select status from incident_department_head_email_receipt", String.class))
+                .containsExactly("SENT");
+    }
+
     @Test void hrAndSecurityRequireExplicitCurrentCaseAuthorization() {
         incident.setIssueType(IssueType.HR_ISSUE);
         incident.setResponsibleDepartmentId(3L);
@@ -301,7 +374,7 @@ class VerifiedIncidentMailRoutingTests {
     }
 
     private List<String> headEmails() {
-        return routing.headRecipients(number).values().stream().map(VerifiedIncidentMailRouting.HeadRecipient::email).toList();
+        return routing.headRecipients(number).values().stream().map(VerifiedIncidentMailRouting.Recipient::email).toList();
     }
 
     private void classification(String status) {

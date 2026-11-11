@@ -51,7 +51,8 @@ public final class IncidentEmailNotifications {
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT,fallbackExecution=false)
     public void created(IncidentCreated event) {
-        if(!settings.enabled() || environment.getProperty("app.incident-access.enabled", Boolean.class, false)) return;
+        if (!settings.enabled() || environment.getProperty("app.incident-access.enabled", Boolean.class, false)
+                || environment.getProperty("app.notifications.email.managed-recipients.enabled", Boolean.class, false)) return;
         try {executor.execute(() -> deliver(event));}
         catch(RuntimeException failure) {LOG.warn("Incident email task was not queued.");}
     }
@@ -226,9 +227,19 @@ public final class IncidentEmailNotifications {
         JavaMailSender sender = senders.getIfUnique();
         if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
         String origin = environment.getProperty("app.notifications.email.portal-origin", "");
+        boolean managed = verifiedRouting.usesManagedRecipients();
+        if (managed && (departmentHeadReceipt == null || IncidentEmailPortalLink.url(origin) == null)) return;
         var content = IncidentEmailTemplate.renderMinimal(origin);
         for (String recipient : candidates) {
             if (dev && !allowlist.contains(recipient)) continue;
+            if (managed) {
+                var target = verifiedRouting.managedRecipient(incidentNumber, recipient);
+                if (target != null) {
+                    deliverWithReceipt(target, sender, from, content,
+                            () -> target.equals(verifiedRouting.managedRecipient(incidentNumber, recipient)));
+                }
+                continue;
+            }
             if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
                     || !verifiedRouting.recipients(incidentNumber).contains(recipient)) continue;
             try {
@@ -253,22 +264,28 @@ public final class IncidentEmailNotifications {
         for (var head : candidates.values()) {
             if ((grantedRecipient != null && grantedRecipient != head.userId())
                     || (dev && !allowlist.contains(head.email()))) continue;
-            try {
-                departmentHeadReceipt.claim(head.incidentId(), head.userId());
-            } catch (org.springframework.dao.DuplicateKeyException duplicate) {
-                continue;
-            }
-            if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
-                    || !head.equals(verifiedRouting.headRecipients(incidentNumber).get(head.userId()))) continue;
-            boolean sent = false;
-            try {
-                sendMinimal(sender, from, head.email(), content);
-                sent = true;
-            } catch (Exception failure) {
-                LOG.warn("Department-head email delivery is uncertain.");
-            } finally {
-                departmentHeadReceipt.finish(head.incidentId(), head.userId(), sent);
-            }
+            deliverWithReceipt(head, sender, from, content,
+                    () -> head.equals(verifiedRouting.headRecipients(incidentNumber).get(head.userId())));
+        }
+    }
+
+    private void deliverWithReceipt(VerifiedIncidentMailRouting.Recipient target, JavaMailSender sender,
+            String from, IncidentEmailTemplate.Rendered content, java.util.function.BooleanSupplier stillAuthorized) {
+        try {
+            departmentHeadReceipt.claim(target.incidentId(), target.userId());
+        } catch (org.springframework.dao.DuplicateKeyException duplicate) {
+            return;
+        }
+        if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
+                || !stillAuthorized.getAsBoolean()) return;
+        boolean sent = false;
+        try {
+            sendMinimal(sender, from, target.email(), content);
+            sent = true;
+        } catch (Exception failure) {
+            LOG.warn("Incident email delivery is uncertain.");
+        } finally {
+            departmentHeadReceipt.finish(target.incidentId(), target.userId(), sent);
         }
     }
 

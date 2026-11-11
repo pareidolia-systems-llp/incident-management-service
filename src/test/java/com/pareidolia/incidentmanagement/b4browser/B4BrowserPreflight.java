@@ -19,7 +19,7 @@ public final class B4BrowserPreflight {
         System.out.println("B4 isolated database and fixture ownership verified.");
     }
 
-    record Settings(String url, String user, String password, String serverId, List<String> fixtureEmails) {
+    record Settings(String url, String user, String password, String serverId, List<String> fixtureEmails, boolean managedRecipientSchema) {
         @Override public String toString() { return "B4 browser preflight settings [redacted]"; }
     }
 
@@ -43,10 +43,10 @@ public final class B4BrowserPreflight {
         }
 
         try (var connection = DriverManager.getConnection(url, user, password)) {
-            verifyDatabase(connection, serverId);
+            boolean managedRecipientSchema = verifyDatabase(connection, serverId);
             verifyFixtureOwnership(connection, emails);
+            return new Settings(url, user, password, serverId, emails, managedRecipientSchema);
         }
-        return new Settings(url, user, password, serverId, emails);
     }
 
     static List<String> fixtureEmails(String input) {
@@ -62,7 +62,7 @@ public final class B4BrowserPreflight {
         return email == null ? "" : email.strip().toLowerCase(Locale.ROOT);
     }
 
-    static void verifyDatabase(Connection connection, String expectedServerId) throws SQLException {
+    static boolean verifyDatabase(Connection connection, String expectedServerId) throws SQLException {
         if (connection.isReadOnly()) throw new IllegalStateException("Unexpected read-only B4 test connection.");
         try (var statement = connection.createStatement();
              var result = statement.executeQuery("""
@@ -73,15 +73,24 @@ public final class B4BrowserPreflight {
                             (SELECT COUNT(*) FROM incident_security_lock),
                             (SELECT COUNT(*) FROM information_schema.tables
                                WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
-                                 AND table_name IN ('incident_department_head_email_receipt', 'incident_oversight_notification'))
+                                 AND table_name IN ('incident_department_head_email_receipt', 'incident_oversight_notification')),
+                            (SELECT COUNT(*) FROM information_schema.tables
+                               WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
+                                 AND table_name IN ('incident_department_mail_recipient', 'incident_department_mail_recipient_audit'))
                      """)) {
             if (!result.next() || !DATABASE.equals(result.getString(1))
                     || !expectedServerId.equalsIgnoreCase(result.getString(2))
                     || !result.getString(3).startsWith("8.4.") || !DATABASE_USER.equals(result.getString(4))
-                    || result.getInt(5) != 34 || result.getInt(6) != 1 || result.getInt(7) != 1
-                    || result.getInt(8) != 2 || result.next()) {
+                    || result.getInt(6) != 1 || result.getInt(7) != 1 || result.getInt(8) != 2) {
                 throw new IllegalStateException("B4 disposable database identity or schema verification failed.");
             }
+            int tables = result.getInt(5);
+            int recipientTables = result.getInt(9);
+            boolean managedRecipientSchema = tables == 36 && recipientTables == 2;
+            if ((!managedRecipientSchema && (tables != 34 || recipientTables != 0)) || result.next()) {
+                throw new IllegalStateException("B4 disposable database identity or schema verification failed.");
+            }
+            return managedRecipientSchema;
         }
     }
 
