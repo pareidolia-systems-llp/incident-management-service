@@ -1178,7 +1178,7 @@ class IncidentAssignmentWorkflowTests {
         db.update("insert into employee_departments(id,display_name,active) values (73,'Operations (Annotation)',1)");
         var request = request(null);
         request.setReporterDepartment(reporterDepartment);
-        request.setResponsibleDepartmentId("Operations (Annotation)".equals(reporterDepartment) ? 73L : null);
+        request.setResponsibleDepartmentId(73L);
         incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
         Long id = incident.getId();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(incidentAccessPolicy, "configureHrAccounts",
@@ -1209,9 +1209,26 @@ class IncidentAssignmentWorkflowTests {
     }
 
     @Test
-    void itServiceAssignmentStillRequiresEligibleRoleAndCoordinatorScope() {
+    void guardedIntakeRequiresDepartmentAndReturnsItsName() {
         var request = request(null);
         request.setResponsibleDepartmentId(null);
+        assertThatThrownBy(() -> incidentService.createIncident(request))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.InvalidRequestException.class)
+                .hasMessage("Select an active responsible department.");
+        request.setResponsibleDepartmentId(71L);
+        request.setReporterDepartment("R&D");
+        var created = incidentService.createIncident(request);
+        var detail = incidentService.getIncident(created.getId());
+        assertThat(detail.getReporterDepartment()).isEqualTo("R&D");
+        assertThat(detail.getResponsibleDepartmentId()).isEqualTo(71L);
+        assertThat(detail.getResponsibleDepartmentName()).isEqualTo("IT");
+    }
+
+    @Test
+    void itServiceAssignmentStillRequiresEligibleRoleAndCoordinatorScope() {
+        db.update("insert into employee_departments(id,display_name,active) values (73,'Operations (Annotation)',1)");
+        var request = request(null);
+        request.setResponsibleDepartmentId(73L);
         incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
         standard();
         Long id = incident.getId();
@@ -1234,7 +1251,6 @@ class IncidentAssignmentWorkflowTests {
         var request = request(null);
         request.setTitle("Confidential payroll complaint");
         request.setReporterDepartment("HR");
-        request.setResponsibleDepartmentId(null);
         incident = incidents.findById(incidentService.createIncident(request).getId()).orElseThrow();
         Long id = incident.getId();
         standard();

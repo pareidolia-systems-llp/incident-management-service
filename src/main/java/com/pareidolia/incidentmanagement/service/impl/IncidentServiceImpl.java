@@ -67,6 +67,8 @@ public class IncidentServiceImpl implements IncidentService {
     private final AppUserService appUserService;
     private final String defaultItOwner;
     private final ApplicationEventPublisher events;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.pareidolia.incidentmanagement.notification.IncidentOversightNotifications oversightNotifications;
 
     public IncidentServiceImpl(
             IncidentRepository incidentRepository,
@@ -95,6 +97,9 @@ public class IncidentServiceImpl implements IncidentService {
         if(!employeeAssignmentEnabled && request.getProposedHandlerUserId()!=null)throw new IllegalArgumentException("Employee assignment is disabled.");
 
         Long departmentId = request.getResponsibleDepartmentId();
+        if (departmentId == null && departmentScopedIntakeAvailable()) {
+            throw new InvalidRequestException("Select an active responsible department.");
+        }
         String responsibleDepartmentName = null;
         if (departmentId != null) {
             if (!departmentScopedIntakeAvailable()) {
@@ -133,6 +138,7 @@ public class IncidentServiceImpl implements IncidentService {
                 SYSTEM_ACTOR,
                 "Automatically assigned to the configured default IT owner."
         );
+        if (oversightNotifications != null) oversightNotifications.record(savedIncident.getId());
         events.publishEvent(new IncidentCreated(savedIncident.getIncidentNumber(), savedIncident.getTitle(),
                 actor.getDisplayName(), savedIncident.getReporterDepartment(), savedIncident.getIssueType(),
                 savedIncident.getSeverity(), savedIncident.getPriority(), savedIncident.getReportedAt(),
@@ -479,6 +485,10 @@ public class IncidentServiceImpl implements IncidentService {
 
     private IncidentResponseDto toResponseDto(Incident incident) {
         IncidentResponseDto dto = incidentMapper.toResponseDto(incident);
+        if (incident.getResponsibleDepartmentId() != null) {
+            incidentRepository.findActiveResponsibleDepartmentName(incident.getResponsibleDepartmentId())
+                    .ifPresent(dto::setResponsibleDepartmentName);
+        }
         enrichAttention(List.of(dto));
         return dto;
     }

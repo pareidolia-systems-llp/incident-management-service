@@ -89,6 +89,8 @@ class VerifiedIncidentMailRoutingTests {
         incident.setResponsibleDepartmentId(2L);
         classification("RESTRICTED");
         env.setProperty(PREFIX + "department-head-notifications.enabled", "true");
+        env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-04T00:00:00");
+        incident.setCreatedAt(java.time.LocalDateTime.parse("2026-11-05T00:00:00"));
         env.setProperty(PREFIX + "department-head-recipients", "2=head@example.test");
         env.setProperty(PREFIX + "restricted-recipients", "2=head@example.test");
         env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
@@ -98,14 +100,133 @@ class VerifiedIncidentMailRoutingTests {
         AppUser head = accounts.findByEmail("head@example.test").orElseThrow();
         when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(2L), eq(22L))).thenReturn(1);
         when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(1L);
-        assertThat(routing.recipients(number)).isEmpty();
+        assertThat(headEmails()).isEmpty();
         head.setLastLoginAt(java.time.LocalDateTime.now());
-        assertThat(routing.recipients(number)).containsExactly("head@example.test");
+        assertThat(headEmails()).containsExactly("head@example.test");
         when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(0L);
-        assertThat(routing.recipients(number)).isEmpty();
+        assertThat(headEmails()).isEmpty();
         when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(1L);
         when(policy.allowsHrOperations(head, incident)).thenReturn(false);
-        assertThat(routing.recipients(number)).isEmpty();
+        assertThat(headEmails()).isEmpty();
+    }
+
+    @Test void departmentHeadRoutingWaitsForClassificationAndUsesCurrentDesignation() {
+        incident.setResponsibleDepartmentId(3L);
+        env.setProperty(PREFIX + "department-recipients", "");
+        env.setProperty(PREFIX + "department-head-notifications.enabled", "true");
+        env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-04T00:00:00");
+        incident.setCreatedAt(java.time.LocalDateTime.parse("2026-11-05T00:00:00"));
+        env.setProperty(PREFIX + "department-head-recipients", "3=previous@example.test,current@example.test");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        account(22L, "previous@example.test", 3L, false);
+        account(23L, "current@example.test", 3L, false);
+        for (String email : List.of("previous@example.test", "current@example.test")) {
+            accounts.findByEmail(email).orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        }
+        when(incidents.countActiveCaseViewGrants(9L, 22L)).thenReturn(1L);
+        when(incidents.countActiveCaseViewGrants(9L, 23L)).thenReturn(1L);
+        assertThat(headEmails()).isEmpty();
+
+        when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(3L), eq(22L))).thenReturn(1);
+        classification("UNCLASSIFIED");
+        assertThat(headEmails()).isEmpty();
+        classification("STANDARD");
+        assertThat(headEmails()).containsExactly("previous@example.test");
+
+        when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(3L), eq(22L))).thenReturn(0);
+        when(db.queryForObject(contains("department_head_designations"), eq(Integer.class), eq(3L), eq(23L))).thenReturn(1);
+        env.setProperty(PREFIX + "department-head-recipients", "3=previous@example.test");
+        assertThat(headEmails()).isEmpty();
+        env.setProperty(PREFIX + "department-head-recipients", "3=previous@example.test,current@example.test");
+        assertThat(headEmails()).containsExactly("current@example.test");
+    }
+
+    @Test void lateHeadGrantAndClassificationShareOneDurableClaim() throws Exception {
+        incident.setResponsibleDepartmentId(2L);
+        incident.setIssueType(IssueType.HR_ISSUE);
+        incident.setCreatedAt(java.time.LocalDateTime.parse("2026-11-05T00:00:00"));
+        classification("RESTRICTED");
+        env.setActiveProfiles("dev");
+        env.setProperty("app.incident-access.enabled", "true");
+        env.setProperty(PREFIX + "enabled", "true");
+        env.setProperty(PREFIX + "department-head-notifications.enabled", "true");
+        env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-04T00:00:00");
+        env.setProperty(PREFIX + "department-head-recipients", "2=hr@example.test");
+        env.setProperty("app.notifications.email.portal-origin", "https://portal.example.test");
+        when(policy.isEnabled()).thenReturn(true);
+        when(snapshot.read(any())).thenAnswer(call -> ((Supplier<?>) call.getArgument(0)).get());
+        accounts.findByEmail("hr@example.test").orElseThrow().setLastLoginAt(java.time.LocalDateTime.now());
+        var dataSource = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:head_receipts;DB_CLOSE_DELAY=-1", "sa", "");
+        var jdbc = new JdbcTemplate(dataSource);
+        jdbc.execute("""
+                create table incident_department_head_email_receipt (
+                    incident_id bigint, recipient_user_id bigint, status varchar(10), finished_at timestamp,
+                    primary key (incident_id, recipient_user_id))
+                """);
+        @SuppressWarnings("unchecked") ObjectProvider<JavaMailSender> provider = mock(ObjectProvider.class);
+        var sender = mock(JavaMailSender.class);
+        when(provider.getIfUnique()).thenReturn(sender);
+        when(sender.createMimeMessage()).thenAnswer(call -> new MimeMessage(Session.getInstance(new Properties())));
+        var settings = new IncidentEmailNotifications.Settings(true, "sender@example.test", "", "", "hr@example.test");
+        var notifier = new IncidentEmailNotifications(settings, env, provider, Runnable::run,
+                new IncidentEmailDetailPolicy(env, java.util.stream.Stream::empty), routing);
+        notifier.departmentHeadReceipt(new DepartmentHeadMailReceipt(jdbc));
+
+        notifier.classificationReady(new IncidentMailReady(number));
+        verifyNoInteractions(sender);
+        when(incidents.countActiveCaseViewGrants(9L, 12L)).thenReturn(1L);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(org.springframework.transaction.event.TransactionalEventListenerFactory.class);
+            context.registerBean(IncidentEmailNotifications.class, () -> notifier);
+            context.refresh();
+            var tx = new org.springframework.transaction.support.TransactionTemplate(
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+            tx.executeWithoutResult(status -> {
+                context.publishEvent(new DepartmentHeadViewGranted(number, 12L));
+                status.setRollbackOnly();
+            });
+            verifyNoInteractions(sender);
+            env.setProperty("app.notifications.email.enabled", "false");
+            notifier.departmentHeadViewGranted(new DepartmentHeadViewGranted(number, 12L));
+            verifyNoInteractions(sender);
+            env.setProperty("app.notifications.email.enabled", "true");
+            env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-05T00:00:00");
+            assertThat(routing.headRecipients(number)).isEmpty();
+            env.setProperty(PREFIX + "department-head-notifications.rollout-cutoff", "2026-11-04T00:00:00");
+
+            var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+            try {
+                var start = new java.util.concurrent.CountDownLatch(1);
+                var late = pool.submit(() -> {
+                    start.await();
+                    tx.executeWithoutResult(status -> context.publishEvent(new DepartmentHeadViewGranted(number, 12L)));
+                    return null;
+                });
+                var classified = pool.submit(() -> {
+                    start.await();
+                    tx.executeWithoutResult(status -> context.publishEvent(new IncidentMailReady(number)));
+                    return null;
+                });
+                start.countDown();
+                late.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                classified.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+        assertThat(jdbc.queryForList("select status from incident_department_head_email_receipt", String.class))
+                .containsExactly("SENT");
+        var sent = org.mockito.ArgumentCaptor.forClass(MimeMessage.class);
+        verify(sender).send(sent.capture());
+        sent.getValue().saveChanges();
+        var bytes = new ByteArrayOutputStream();
+        sent.getValue().writeTo(bytes);
+        assertThat(bytes.toString(java.nio.charset.StandardCharsets.UTF_8))
+                .contains("To: hr@example.test", "https://portal.example.test/")
+                .doesNotContain(number, "Printer", "Trusted", "Human Resources");
     }
 
     @Test void referralMailIsMinimalAndRecordsTransportFailure() {
@@ -177,6 +298,10 @@ class VerifiedIncidentMailRoutingTests {
         sent.getValue().writeTo(bytes);
         assertThat(bytes.toString(java.nio.charset.StandardCharsets.UTF_8))
                 .contains("To: ops@example.test").doesNotContain(number, "Printer", "Trusted");
+    }
+
+    private List<String> headEmails() {
+        return routing.headRecipients(number).values().stream().map(VerifiedIncidentMailRouting.HeadRecipient::email).toList();
     }
 
     private void classification(String status) {

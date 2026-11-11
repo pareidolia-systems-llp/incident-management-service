@@ -139,6 +139,10 @@ public class IncidentSecurityAdministrationService {
         if(rows.isEmpty())em.createNativeQuery("insert into incident_security_grants(incident_id,user_id,permission,active,version) values (?1,?2,?3,1,?4)").setParameter(1,incident).setParameter(2,target).setParameter(3,permission).setParameter(4,next).executeUpdate();
         else if(em.createNativeQuery("update incident_security_grants set active=?4,version=?5 where incident_id=?1 and user_id=?2 and permission=?3 and version=?6").setParameter(1,incident).setParameter(2,target).setParameter(3,permission).setParameter(4,grant?1:0).setParameter(5,next).setParameter(6,version).executeUpdate()!=1)throw conflict();
         if(em.createNativeQuery("insert into incident_security_grant_audit(incident_id,target_user_id,permission,actor_user_id,old_active,new_active,version,reason) values (?1,?2,?3,?4,?5,?6,?7,?8)").setParameter(1,incident).setParameter(2,target).setParameter(3,permission).setParameter(4,actor.getId()).setParameter(5,old).setParameter(6,grant?1:0).setParameter(7,next).setParameter(8,reason.trim()).executeUpdate()!=1)throw new IllegalStateException("Grant audit failed.");
+        if (grant && "VIEW".equals(permission)) {
+            events.publishEvent(new com.pareidolia.incidentmanagement.notification.DepartmentHeadViewGranted(
+                    em.find(Incident.class, incident).getIncidentNumber(), target));
+        }
         return next;
     }
     @Transactional(readOnly=true)

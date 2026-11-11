@@ -27,6 +27,12 @@ public final class IncidentEmailNotifications {
     private final IncidentEmailDetailPolicy detailPolicy;
     private final VerifiedIncidentMailRouting verifiedRouting;
     private HrReassignmentReferralService hrReferrals;
+    private DepartmentHeadMailReceipt departmentHeadReceipt;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void departmentHeadReceipt(DepartmentHeadMailReceipt receipt) {
+        this.departmentHeadReceipt = receipt;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void hrReferrals(HrReassignmentReferralService referrals) {
@@ -51,6 +57,15 @@ public final class IncidentEmailNotifications {
     }
     @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT, fallbackExecution=false)
     public void classificationReady(IncidentMailReady event) {
+        queueVerified(event.incidentNumber(), null);
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = false)
+    public void departmentHeadViewGranted(DepartmentHeadViewGranted event) {
+        queueVerified(event.incidentNumber(), event.recipientId());
+    }
+
+    private void queueVerified(String incidentNumber, Long grantedRecipient) {
         if (!settings.enabled() || !environment.getProperty("app.incident-access.enabled", Boolean.class, false)
                 || !environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)) return;
         try {
@@ -60,7 +75,8 @@ public final class IncidentEmailNotifications {
                     boolean production = environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
                             && environment.getProperty("app.notifications.email.local-postfix-enabled", Boolean.class, false);
                     if (dev != production && environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())) {
-                        deliverVerified(event.incidentNumber(), dev, production);
+                        if (grantedRecipient == null) deliverVerified(incidentNumber, dev, production);
+                        deliverDepartmentHeads(incidentNumber, grantedRecipient, dev, production);
                     }
                 } catch (RuntimeException failure) {
                     LOG.warn("Incident mail authorization unavailable. Notification withheld.");
@@ -136,7 +152,7 @@ public final class IncidentEmailNotifications {
             boolean production=environment.acceptsProfiles(Profiles.of("default & !dev & !prod & !production"))
                     && environment.getProperty("app.notifications.email.local-postfix-enabled",Boolean.class,false);
             if(!settings.enabled() || !environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled()) || dev==production) return;
-            if(event.incidentNumber()==null || !event.incidentNumber().matches("INC-[0-9]{4}-[0-9]{8}-[0-9]{6}-[A-F0-9]{8}")) return;
+            if(event.incidentNumber()==null || !event.incidentNumber().matches("INC-(?:[0-9]{4}-)?[0-9]{8}-[0-9]{6}-[A-F0-9]{8}")) return;
             if (environment.getProperty("app.notifications.email.verified-department-routing.enabled", Boolean.class, false)) {
                 deliverVerified(event.incidentNumber(), dev, production);
                 return;
@@ -216,17 +232,55 @@ public final class IncidentEmailNotifications {
             if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
                     || !verifiedRouting.recipients(incidentNumber).contains(recipient)) continue;
             try {
-                var message = sender.createMimeMessage();
-                var helper = new org.springframework.mail.javamail.MimeMessageHelper(message, true, "UTF-8");
-                helper.setFrom(from);
-                helper.setTo(recipient);
-                helper.setSubject(content.subject());
-                helper.setText(content.plainText(), content.html());
-                sender.send(message);
+                sendMinimal(sender, from, recipient, content);
             } catch (Exception failure) {
                 LOG.warn("Incident email delivery failed.");
             }
         }
+    }
+
+    private void deliverDepartmentHeads(String incidentNumber, Long grantedRecipient, boolean dev, boolean production) {
+        if (verifiedRouting == null || departmentHeadReceipt == null) return;
+        var candidates = verifiedRouting.headRecipients(incidentNumber);
+        if (candidates.isEmpty()) return;
+        var allowlist = addresses(settings.devAllowlist());
+        String from = address(settings.from());
+        JavaMailSender sender = senders.getIfUnique();
+        if (sender == null || (production && (!APPROVED_PRODUCTION_SENDER.equals(from) || !approvedPostfix(sender)))) return;
+        String origin = environment.getProperty("app.notifications.email.portal-origin", "");
+        if (IncidentEmailPortalLink.url(origin) == null) return;
+        var content = IncidentEmailTemplate.renderMinimal(origin);
+        for (var head : candidates.values()) {
+            if ((grantedRecipient != null && grantedRecipient != head.userId())
+                    || (dev && !allowlist.contains(head.email()))) continue;
+            try {
+                departmentHeadReceipt.claim(head.incidentId(), head.userId());
+            } catch (org.springframework.dao.DuplicateKeyException duplicate) {
+                continue;
+            }
+            if (!environment.getProperty("app.notifications.email.enabled", Boolean.class, settings.enabled())
+                    || !head.equals(verifiedRouting.headRecipients(incidentNumber).get(head.userId()))) continue;
+            boolean sent = false;
+            try {
+                sendMinimal(sender, from, head.email(), content);
+                sent = true;
+            } catch (Exception failure) {
+                LOG.warn("Department-head email delivery is uncertain.");
+            } finally {
+                departmentHeadReceipt.finish(head.incidentId(), head.userId(), sent);
+            }
+        }
+    }
+
+    private static void sendMinimal(JavaMailSender sender, String from, String recipient,
+            IncidentEmailTemplate.Rendered content) throws jakarta.mail.MessagingException {
+        var message = sender.createMimeMessage();
+        var helper = new org.springframework.mail.javamail.MimeMessageHelper(message, true, "UTF-8");
+        helper.setFrom(from);
+        helper.setTo(recipient);
+        helper.setSubject(content.subject());
+        helper.setText(content.plainText(), content.html());
+        sender.send(message);
     }
 
     private static boolean approvedPostfix(JavaMailSender sender) {

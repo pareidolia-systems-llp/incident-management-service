@@ -21,6 +21,7 @@ public class IncidentResponseDto {
     private String reportedBy;
     private String reporterDepartment;
     private Long responsibleDepartmentId;
+    private String responsibleDepartmentName;
     private String deskNumber;
     private String title;
     private String description;

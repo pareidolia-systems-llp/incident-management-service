@@ -8,6 +8,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mock.env.MockEnvironment;
@@ -16,7 +18,11 @@ import static org.mockito.Mockito.*;
 
 class IncidentEmailV2Tests {
     static IncidentCreated event(IssueType type) {
-        return new IncidentCreated("INC-2026-20261104-120000-ABCDEF12", "Printer <script>alert(1)</script>\r\nBcc: x@example.test",
+        return event(type, "INC-2026-20261104-120000-ABCDEF12");
+    }
+
+    private static IncidentCreated event(IssueType type, String incidentNumber) {
+        return new IncidentCreated(incidentNumber, "Printer <script>alert(1)</script>\r\nBcc: x@example.test",
             "Trusted <Reporter>", "Ops & Sales",type,Severity.LOW,Priority.HIGH,LocalDateTime.parse("2026-11-04T12:00:00"));
     }
     @Test void genericRestrictedContentNeverLeaksInSubjectOrEitherBody() {
@@ -113,16 +119,19 @@ class IncidentEmailV2Tests {
         catch(jakarta.mail.MessagingException e){throw new AssertionError(e);}
     }
     @SuppressWarnings("unchecked")
-    @Test void disabledV2PreservesLegacyGlobalRoutingAndIgnoresDepartmentMapping() {
+    @ParameterizedTest
+    @ValueSource(strings = {"INC-20261104-120000-ABCDEF12", "INC-2026-20261104-120000-ABCDEF12"})
+    void disabledV2PreservesLegacyGlobalRoutingAndIgnoresDepartmentMapping(String incidentNumber) {
         var sender=mock(JavaMailSender.class);var provider=mock(ObjectProvider.class);when(provider.getIfUnique()).thenReturn(sender);
         var env=new MockEnvironment();env.setActiveProfiles("dev");
         env.setProperty("app.notifications.email.v2.department-recipients","Ops & Sales=extra@example.test");
         var settings=new IncidentEmailNotifications.Settings(true,"sender@example.test","it@example.test","hr@example.test",
             "it@example.test,hr@example.test,extra@example.test");
-        IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE));
+        IncidentEmailTestSupport.trustedItNotifier(settings,env,provider,Runnable::run).created(event(IssueType.IT_ISSUE, incidentNumber));
         var messages=org.mockito.ArgumentCaptor.forClass(org.springframework.mail.SimpleMailMessage.class);
         verify(sender,times(2)).send(messages.capture());
         assertThat(messages.getAllValues()).extracting(m -> m.getTo()[0]).containsExactly("it@example.test","hr@example.test");
+        assertThat(messages.getAllValues()).allSatisfy(message -> assertThat(message.getText()).contains(incidentNumber));
         verify(sender,never()).send(any(MimeMessage.class));
     }
     @SuppressWarnings("unchecked")
