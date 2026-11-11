@@ -84,12 +84,17 @@ public class IncidentAttachmentServiceImpl implements IncidentAttachmentService 
                 .persistedRestrictions(List.of(incident), incidents).contains(incidentId)) {
             throw new IncidentNotFoundException("Incident not found.");
         }
-        if (incidentAccessEnabled && actor.getRole() == AppUserRole.REPORTER
-                && !com.pareidolia.incidentmanagement.security.IncidentConfidentiality.isReporter(actor, incident)) {
-            throw new IncidentNotFoundException("Incident not found.");
+        if (incidentAccessEnabled) {
+            boolean reporter = actor.getRole() == AppUserRole.REPORTER;
+            var permission = reporter
+                    ? com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.VIEW
+                    : com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY;
+            if (accessPolicy == null || !accessPolicy.canForMutation(actor, incident, permission)
+                    || (reporter && (actor.getRole() != AppUserRole.REPORTER
+                        || !com.pareidolia.incidentmanagement.security.IncidentConfidentiality.isReporter(actor, incident)))) {
+                throw new IncidentNotFoundException("Incident not found.");
+            }
         }
-        if (incidentAccessEnabled && (accessPolicy == null || !accessPolicy.canForMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY)))
-            throw new IncidentNotFoundException("Incident not found.");
         if (incidentAccessEnabled && actor.getRole() != AppUserRole.REPORTER && actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN) throw new IncidentNotFoundException("Incident not found.");
         if (files == null || files.isEmpty() || files.size() > 5) {
             throw new InvalidRequestException("Select between 1 and 5 images per upload.");

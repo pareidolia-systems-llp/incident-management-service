@@ -98,7 +98,7 @@ class IncidentAssignmentWorkflowTests {
     void conflict(Runnable work){assertThatThrownBy(work::run).isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));}
 
     @Test
-    void guardedScreenshotUploadRequiresCaseGrantsAndReporterOwnership() throws Exception {
+    void guardedScreenshotUploadAllowsOriginalReporterAndRequiresOwnership() throws Exception {
         var mvc = MockMvcBuilders.standaloneSetup(
                 new com.pareidolia.incidentmanagement.controller.IncidentAttachmentController(attachments))
                 .setControllerAdvice(new GlobalExceptionHandler()).build();
@@ -108,7 +108,8 @@ class IncidentAssignmentWorkflowTests {
         String path = "/api/incidents/" + incident.getId() + "/attachments";
 
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart(path).file(screenshot))
-                .andExpect(status().isNotFound());
+                .andExpect(status().isCreated());
+        assertThat(db.queryForObject("select count(*) from incident_security_grants where incident_id=? and user_id=? and permission='MODIFY'", Long.class, incident.getId(), reporter.getId())).isZero();
         login(classifier);
         administration.classify(incident.getId(), "STANDARD", 0L, "Synthetic screenshot fixture");
         for (var permission : List.of("VIEW", "MODIFY")) {
@@ -122,12 +123,65 @@ class IncidentAssignmentWorkflowTests {
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart(path).file(screenshot))
                 .andExpect(status().isCreated()).andExpect(jsonPath("$[0].originalFilename").value("synthetic.png"));
         var metadata = attachments.list(incident.getId());
-        assertThat(metadata).hasSize(1);
+        assertThat(metadata).hasSize(2);
         assertThat(attachments.content(incident.getId(), metadata.get(0).id()).data()).isEqualTo(png.toByteArray());
         assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(incident.getId()))
-                .extracting(IncidentHistory::getActionType).containsExactly(HistoryActionType.INCIDENT_CREATED, HistoryActionType.ATTACHMENT_ADDED);
+                .extracting(IncidentHistory::getActionType).containsExactly(HistoryActionType.INCIDENT_CREATED, HistoryActionType.ATTACHMENT_ADDED, HistoryActionType.ATTACHMENT_ADDED);
     }
 
+    private org.springframework.mock.web.MockMultipartFile validScreenshot() throws Exception {
+        var bytes = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(2, 2, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", bytes);
+        return new org.springframework.mock.web.MockMultipartFile("files", "synthetic.png", "image/png", bytes.toByteArray());
+    }
+
+    @Test
+    void confidentialReporterUploadRequiresCurrentCaseView() throws Exception {
+        incident.setIssueType(IssueType.HR_ISSUE);
+        incidents.saveAndFlush(incident);
+        login(classifier);
+        administration.classify(incident.getId(), "RESTRICTED", 0L, "Sensitive synthetic case");
+        grant(reporter.getId(), "VIEW");
+        login(reporter);
+        assertThat(attachments.upload(incident.getId(), List.of(validScreenshot()))).hasSize(1);
+        db.update("update incident_security_grants set active=0 where incident_id=? and user_id=? and permission='VIEW'", incident.getId(), reporter.getId());
+        assertThatThrownBy(() -> attachments.upload(incident.getId(), List.of(validScreenshot())))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+    }
+
+    @Test
+    void screenshotUploadRejectsUnverifiedOrDisabledReporter() throws Exception {
+        var oidc = mock(OidcUser.class);
+        when(oidc.getEmail()).thenReturn(reporter.getEmail());
+        when(oidc.getEmailVerified()).thenReturn(false);
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(oidc, "", List.of()));
+        assertThatThrownBy(() -> attachments.upload(incident.getId(), List.of(validScreenshot())))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        login(reporter);
+        db.update("update app_users set active=false where id=?", reporter.getId());
+        assertThatThrownBy(() -> attachments.upload(incident.getId(), List.of(validScreenshot())))
+                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+    }
+
+    @Test
+    void handlerUploadStillRequiresModifyAndAttachmentAuditRollsBack() throws Exception {
+        standard();
+        grant(handler.getId(), "MODIFY");
+        login(handler);
+        var file = validScreenshot();
+        assertThat(attachments.upload(incident.getId(), List.of(file))).hasSize(1);
+        long before = db.queryForObject("select count(*) from incident_attachments", Long.class);
+        long historyBefore = db.queryForObject("select count(*) from incident_history", Long.class);
+        db.execute("alter table incident_history add constraint synthetic_reject_attachment_audit check (remarks not like '%blocked.png%')");
+        try {
+            var blocked = new org.springframework.mock.web.MockMultipartFile("files", "blocked.png", "image/png", file.getBytes());
+            assertThatThrownBy(() -> attachments.upload(incident.getId(), List.of(blocked))).isInstanceOf(RuntimeException.class);
+            assertThat(db.queryForObject("select count(*) from incident_attachments", Long.class)).isEqualTo(before);
+            assertThat(db.queryForObject("select count(*) from incident_history", Long.class)).isEqualTo(historyBefore);
+        } finally {
+            db.execute("alter table incident_history drop constraint synthetic_reject_attachment_audit");
+        }
+    }
     @Test
     void hrReferralIntakeReturnsTheSameEmptyResponseWithoutCaseAccess() throws Exception {
         AppUser requester = prepareHrReferral();
@@ -1320,6 +1374,32 @@ class IncidentAssignmentWorkflowTests {
         db.update("update incident_security_grants set active=0 where incident_id=? and user_id=? and permission='MODIFY'", incident.getId(), reporter.getId());
         assertThatThrownBy(() -> incidentService.changePriority(incident.getId(), request))
                 .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+    }
+    @Test
+    void guardedResolutionFeedbackReopensOnlyForOriginalReporter() {
+        standard();
+        incident.setStatus(IncidentStatus.RESOLVED);
+        incidents.saveAndFlush(incident);
+        var feedback = new ResolutionFeedbackRequestDto();
+        feedback.setFeedback("Synthetic issue remains");
+        feedback.setEvidenceReference("Synthetic screenshot reference");
+        login(handler);
+        assertThatThrownBy(() -> incidentService.submitResolutionFeedback(incident.getId(), feedback))
+                .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+        assertThat(incidents.findById(incident.getId()).orElseThrow().getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+
+        login(reporter);
+        var result = incidentService.submitResolutionFeedback(incident.getId(), feedback);
+        assertThat(result.getStatus()).isEqualTo(IncidentStatus.IN_PROGRESS);
+        assertThat(result.isIssueStillPersists()).isTrue();
+        assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(incident.getId()))
+                .filteredOn(entry -> entry.getActionType() == HistoryActionType.RESOLUTION_NOT_ACCEPTED)
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.getChangedBy()).isEqualTo(reporter.getEmail());
+                    assertThat(entry.getRemarks()).contains("Synthetic issue remains", "Synthetic screenshot reference");
+                });
+        assertThatThrownBy(() -> incidentService.submitResolutionFeedback(incident.getId(), feedback))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.InvalidIncidentStateException.class);
     }
     @Test void noCapabilityNoViewNoScopeAndNoEligibilityDeny(){standard();login(reporter);assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"Unauthorized")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);login(assigner);db.update("update handler_eligibility_grants set active=0 where user_id=?",handler.getId());assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"No eligibility")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);org.springframework.test.util.ReflectionTestUtils.setField(assignments,"allowedPairs",Set.of());assertThatThrownBy(()->assignments.assign(incident.getId(),alternate.getId(),0L,1L,"No scope")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThat(assignments.search("Employee",incident.getId())).isEmpty();}
     @Test void handlerAccessIsRequiredAndIsNeverCreatedByAssignment(){standard();db.update("delete from incident_security_grants where user_id=? and permission='HANDLE'",handler.getId());assertThatThrownBy(()->assignments.assign(incident.getId(),handler.getId(),0L,1L,"Missing case access")).isInstanceOf(org.springframework.security.access.AccessDeniedException.class);assertThat(assignments.get(incident.getId()).handler()).isNull();assertThat(assignments.search("handler",incident.getId())).isEmpty();}
