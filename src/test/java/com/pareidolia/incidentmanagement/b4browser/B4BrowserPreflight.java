@@ -70,12 +70,16 @@ public final class B4BrowserPreflight {
                             (SELECT COUNT(*) FROM information_schema.tables
                                WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'),
                             (SELECT COUNT(*) FROM incident_security_lock WHERE id = 1),
-                            (SELECT COUNT(*) FROM incident_security_lock)
+                            (SELECT COUNT(*) FROM incident_security_lock),
+                            (SELECT COUNT(*) FROM information_schema.tables
+                               WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
+                                 AND table_name IN ('incident_department_head_email_receipt', 'incident_oversight_notification'))
                      """)) {
             if (!result.next() || !DATABASE.equals(result.getString(1))
                     || !expectedServerId.equalsIgnoreCase(result.getString(2))
                     || !result.getString(3).startsWith("8.4.") || !DATABASE_USER.equals(result.getString(4))
-                    || result.getInt(5) != 32 || result.getInt(6) != 1 || result.getInt(7) != 1 || result.next()) {
+                    || result.getInt(5) != 34 || result.getInt(6) != 1 || result.getInt(7) != 1
+                    || result.getInt(8) != 2 || result.next()) {
                 throw new IllegalStateException("B4 disposable database identity or schema verification failed.");
             }
         }

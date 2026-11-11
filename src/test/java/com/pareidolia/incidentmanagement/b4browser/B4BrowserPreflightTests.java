@@ -55,11 +55,24 @@ class B4BrowserPreflightTests {
         when(result.getString(2)).thenReturn("11111111-1111-1111-1111-111111111111");
         when(result.getString(3)).thenReturn("8.4.11");
         when(result.getString(4)).thenReturn("b4_browser_test");
-        when(result.getInt(5)).thenReturn(32);
+        when(result.getInt(5)).thenReturn(34);
         when(result.getInt(6)).thenReturn(1);
         when(result.getInt(7)).thenReturn(1);
+        when(result.getInt(8)).thenReturn(2);
         B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111");
         assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "22222222-2222-2222-2222-222222222222"))
+                .isInstanceOf(IllegalStateException.class);
+        verify(statement, times(2)).executeQuery(argThat(sql -> sql.contains("incident_department_head_email_receipt")
+                && sql.contains("incident_oversight_notification")));
+
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(8)).thenReturn(1);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
+                .isInstanceOf(IllegalStateException.class);
+        when(result.getInt(8)).thenReturn(2);
+        when(result.next()).thenReturn(true, false);
+        when(result.getInt(5)).thenReturn(32);
+        assertThatThrownBy(() -> B4BrowserPreflight.verifyDatabase(connection, "11111111-1111-1111-1111-111111111111"))
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -75,11 +88,150 @@ class B4BrowserPreflightTests {
             assertThat(environment.getProperty("spring.datasource.hikari.jdbc-url")).isNull();
             assertThat(environment.getProperty("spring.application.json")).isNull();
             assertThat(environment.getProperty("app.notifications.email.enabled")).isEqualTo("false");
+            assertThat(environment.getProperty("app.employee-assignment.active-email-search.enabled")).isEqualTo("true");
             assertThat(environment.getProperty("server.address")).isEqualTo("127.0.0.1");
         } finally {
             System.clearProperty("spring.application.json");
             System.clearProperty("spring.datasource.hikari.jdbc-url");
         }
+    }
+
+    @Test
+    void forwardsExplicitDepartmentAdministrationOptIns() {
+        var aliases = java.util.Map.of(
+                "APP_DEPARTMENT_HEAD_DESIGNATIONS_ENABLED", "true",
+                "APP_HANDLER_ELIGIBILITY_ADMIN_ENABLED", "true",
+                "APP_HANDLER_ELIGIBILITY_ADMIN_ALLOWED_EMAILS", "eligibility-admin@example.test");
+        var previous = new java.util.HashMap<String, String>();
+        aliases.forEach((key, value) -> previous.put(key, System.setProperty(key, value)));
+        try {
+            var settings = new B4BrowserPreflight.Settings("jdbc:mysql://127.0.0.1:59450/incident_security_disposable",
+                    "b4_browser_test", "synthetic", "11111111-1111-1111-1111-111111111111", List.of(REPORTER));
+            var environment = B4BrowserTestServer.isolatedEnvironment(settings);
+            assertThat(environment.getProperty("app.department-head-designations.enabled")).isEqualTo("true");
+            assertThat(environment.getProperty("app.handler-eligibility-admin.enabled")).isEqualTo("true");
+            assertThat(environment.getProperty("app.handler-eligibility-admin.allowed-emails"))
+                    .isEqualTo("eligibility-admin@example.test");
+            assertThat(environment.getProperty("app.auth.bootstrap-admin-emails")).isEmpty();
+        } finally {
+            previous.forEach((key, value) -> {
+                if (value == null) System.clearProperty(key);
+                else System.setProperty(key, value);
+            });
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    void logsOnlyASafeOAuthFailureCategoryAndKeepsTheRedirect(
+            org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        var handler = new B4BrowserTestServer.FixtureAuthenticationFailureHandler();
+        var request = new MockHttpServletRequest();
+        var response = new MockHttpServletResponse();
+        var error = new org.springframework.security.oauth2.core.OAuth2Error(
+                "authorization_request_not_found", "synthetic-sensitive-error-detail", null);
+        handler.onAuthenticationFailure(request, response,
+                new org.springframework.security.oauth2.core.OAuth2AuthenticationException(error));
+        assertThat(response.getRedirectedUrl()).isEqualTo("http://127.0.0.1:5175?authError=access_denied");
+        assertThat(output.getAll()).contains("B4 Google OAuth callback failed: callback_session_or_state")
+                .doesNotContain("synthetic-sensitive-error-detail");
+    }
+
+    @Test
+    void distinguishesOAuthFailuresWithoutReadingProviderText() {
+        var httpFailure = new org.springframework.web.client.HttpServerErrorException(
+                org.springframework.http.HttpStatus.BAD_GATEWAY, "synthetic-response-body");
+        var transportFailure = new org.springframework.web.client.ResourceAccessException(
+                "synthetic-request-url", new javax.net.ssl.SSLHandshakeException("synthetic-tls-detail"));
+        assertThat(oauthCategory("invalid_client", null)).isEqualTo("invalid_client_credentials");
+        assertThat(oauthCategory("invalid_token_response", httpFailure)).isEqualTo("token_endpoint_http_failure");
+        assertThat(oauthCategory("invalid_user_info_response", httpFailure)).isEqualTo("user_info_endpoint_http_failure");
+        assertThat(oauthCategory("invalid_user_info_response",
+                new org.springframework.security.oauth2.core.OAuth2AuthorizationException(
+                        new org.springframework.security.oauth2.core.OAuth2Error("invalid_token"))))
+                .isEqualTo("user_info_endpoint_http_failure");
+        assertThat(oauthCategory("invalid_id_token", null)).isEqualTo("oidc_other_id_token_validation");
+        assertThat(oauthCategory("invalid_user_info_response", null)).isEqualTo("oidc_user_info_subject_validation");
+        assertThat(oauthCategory("invalid_token_response", transportFailure)).isEqualTo("token_endpoint_network_or_tls");
+        assertThat(oauthCategory("invalid_user_info_response", transportFailure)).isEqualTo("user_info_endpoint_network_or_tls");
+        assertThat(oauthCategory("invalid_id_token", transportFailure)).isEqualTo("oidc_validation_network_or_tls");
+        assertThat(oauthCategory("invalid_grant", null)).isEqualTo("token_endpoint_grant_rejected");
+        assertThat(oauthCategory("synthetic-untrusted-code", null)).isEqualTo("other");
+    }
+
+    @Test
+    void distinguishesIdTokenChecksUsingSpringSecurityValidationErrors() {
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {iss=synthetic-issuer}"))
+                .isEqualTo("oidc_issuer_mismatch");
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {aud=[synthetic-client]}"))
+                .isEqualTo("oidc_audience_or_authorized_party_mismatch");
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {azp=synthetic-client}"))
+                .isEqualTo("oidc_audience_or_authorized_party_mismatch");
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {exp=2026-11-01T00:00:00Z}"))
+                .isEqualTo("oidc_token_expired");
+        assertThat(idTokenCategory("Jwt used before 2026-11-01T00:00:00Z"))
+                .isEqualTo("oidc_nbf_in_future");
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {iat=null, sub=null}"))
+                .isEqualTo("oidc_required_claim_missing");
+        assertThat(idTokenCategory("The ID Token contains invalid claims: {aud=[]}"))
+                .isEqualTo("oidc_required_claim_missing");
+        assertThat(idTokenCategory("synthetic-unknown-validation-detail"))
+                .isEqualTo("oidc_other_claim_validation");
+        assertThat(oauthCategory("invalid_id_token", new org.springframework.security.oauth2.jwt.BadJwtException(
+                "synthetic-sensitive-token-detail", new com.nimbusds.jose.proc.BadJWSException("synthetic-signature-detail"))))
+                .isEqualTo("oidc_signature_or_jwk");
+        assertThat(oauthCategory("invalid_nonce", null)).isEqualTo("oidc_nonce_validation");
+    }
+
+    @Test
+    void identifiesWhichSpringValidatorRejectedAnOidcTimestamp() {
+        var now = java.time.Instant.parse("2026-11-10T12:50:00Z");
+        var clock = java.time.Clock.fixed(now, java.time.ZoneOffset.UTC);
+        var google = org.springframework.security.config.oauth2.client.CommonOAuth2Provider.GOOGLE
+                .getBuilder("google").clientId("synthetic-client").clientSecret("synthetic").build();
+        var issuedAt = new org.springframework.security.oauth2.client.oidc.authentication.OidcIdTokenValidator(google);
+        issuedAt.setClock(clock);
+        var notBefore = new org.springframework.security.oauth2.jwt.JwtTimestampValidator();
+        notBefore.setClock(clock);
+
+        var futureIssued = timestampToken(now, 61, 0);
+        assertThat(oidcTimestampFailure(issuedAt.validate(futureIssued))).isEqualTo("oidc_iat_in_future");
+        assertThat(notBefore.validate(futureIssued).hasErrors()).isFalse();
+        var futureNotBefore = timestampToken(now, 0, 61);
+        assertThat(oidcTimestampFailure(notBefore.validate(futureNotBefore))).isEqualTo("oidc_nbf_in_future");
+        assertThat(issuedAt.validate(futureNotBefore).hasErrors()).isFalse();
+        var atTolerance = timestampToken(now, 60, 60);
+        assertThat(issuedAt.validate(atTolerance).hasErrors()).isFalse();
+        assertThat(notBefore.validate(atTolerance).hasErrors()).isFalse();
+    }
+
+    private static org.springframework.security.oauth2.jwt.Jwt timestampToken(
+            java.time.Instant now, int issuedAtSeconds, int notBeforeSeconds) {
+        return org.springframework.security.oauth2.jwt.Jwt.withTokenValue("synthetic")
+                .header("alg", "RS256").issuer("https://accounts.google.com")
+                .subject("synthetic-subject").audience(List.of("synthetic-client"))
+                .issuedAt(now.plusSeconds(issuedAtSeconds)).notBefore(now.plusSeconds(notBeforeSeconds))
+                .expiresAt(now.plusSeconds(600)).build();
+    }
+
+    private static String oidcTimestampFailure(org.springframework.security.oauth2.core.OAuth2TokenValidatorResult result) {
+        assertThat(result.hasErrors()).isTrue();
+        return oauthCategory("invalid_id_token", new org.springframework.security.oauth2.jwt.JwtValidationException(
+                "synthetic validation exception", result.getErrors()));
+    }
+
+    private static String idTokenCategory(String description) {
+        return oauthCategory("invalid_id_token", new org.springframework.security.oauth2.jwt.JwtValidationException(
+                "synthetic-sensitive-token-detail", List.of(new org.springframework.security.oauth2.core.OAuth2Error(
+                        "invalid_id_token", description, null))));
+    }
+
+    private static String oauthCategory(String code, Throwable cause) {
+        var error = new org.springframework.security.oauth2.core.OAuth2Error(code, "synthetic-sensitive-detail", null);
+        var failure = cause == null
+                ? new org.springframework.security.oauth2.core.OAuth2AuthenticationException(error)
+                : new org.springframework.security.oauth2.core.OAuth2AuthenticationException(error, cause);
+        return B4BrowserTestServer.FixtureAuthenticationFailureHandler.category(failure);
     }
 
     @Test
