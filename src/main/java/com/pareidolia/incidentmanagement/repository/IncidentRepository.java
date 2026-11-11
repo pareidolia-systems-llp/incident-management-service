@@ -25,6 +25,13 @@ public interface IncidentRepository extends JpaRepository<Incident, Long> {
             nativeQuery = true)
     Optional<String> lockActiveResponsibleDepartmentName(@Param("id") Long id);
 
+    @Query(value = """
+            select count(*) from department_head_designations h
+            join employee_departments d on d.id = h.department_id
+            where h.department_id = :department and h.user_id = :user
+              and h.active = 1 and d.active = 1
+            """, nativeQuery = true)
+    long countActiveDepartmentHead(@Param("department") Long departmentId, @Param("user") Long userId);
     @Query(value = "select display_name from employee_departments where id = :id and active = 1",
             nativeQuery = true)
     Optional<String> findActiveResponsibleDepartmentName(@Param("id") Long id);

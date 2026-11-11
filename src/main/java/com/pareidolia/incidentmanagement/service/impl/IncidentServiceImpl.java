@@ -291,10 +291,15 @@ public class IncidentServiceImpl implements IncidentService {
     public IncidentResponseDto changePriority(Long id, ChangePriorityRequestDto request) {
         securityWrite();
         AppUser actor = getAuthenticatedUser();
-        requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
         Incident incident = findIncident(id);
         requireMutation(actor,incident,com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY);
-        if (incidentAccessEnabled) requireRole(actor, AppUserRole.IT_HANDLER, AppUserRole.ADMIN);
+        if (actor.getRole() != AppUserRole.IT_HANDLER && actor.getRole() != AppUserRole.ADMIN) {
+            Long department = incident.getResponsibleDepartmentId();
+            if (!incidentAccessEnabled || department == null || actor.getId() == null
+                    || incidentRepository.countActiveDepartmentHead(department, actor.getId()) != 1) {
+                throw new AccessDeniedException("Access denied.");
+            }
+        }
         ensureNotClosed(incident, "change priority for");
 
         String oldPriority = enumValue(incident.getPriority());
