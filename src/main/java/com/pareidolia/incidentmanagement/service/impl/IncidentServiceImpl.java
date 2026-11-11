@@ -155,7 +155,15 @@ public class IncidentServiceImpl implements IncidentService {
         AppUser actor = getAuthenticatedUser();
         Incident incident = findIncident(id);
         ensureCanViewIncident(actor, incident, ReadOperation.DETAIL);
-        return toResponseDto(incident);
+        IncidentResponseDto result = toResponseDto(incident);
+        if (incidentAccessEnabled && incident.getStatus() != IncidentStatus.CLOSED
+                && actor.getId() != null && incident.getResponsibleDepartmentId() != null
+                && accessPolicy != null
+                && accessPolicy.can(actor, incident, com.pareidolia.incidentmanagement.security.IncidentAccessPolicy.Permission.MODIFY)
+                && incidentRepository.countActiveDepartmentHead(incident.getResponsibleDepartmentId(), actor.getId()) == 1) {
+            result.setCanChangePriority(true);
+        }
+        return result;
 
         });
     }

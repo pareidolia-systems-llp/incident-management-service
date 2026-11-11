@@ -22,6 +22,7 @@ public class IncidentResponseDto {
     private String reporterDepartment;
     private Long responsibleDepartmentId;
     private String responsibleDepartmentName;
+    private boolean canChangePriority;
     private String deskNumber;
     private String title;
     private String description;

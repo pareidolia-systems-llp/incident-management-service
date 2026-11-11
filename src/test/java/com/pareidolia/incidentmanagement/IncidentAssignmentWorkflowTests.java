@@ -1358,6 +1358,7 @@ class IncidentAssignmentWorkflowTests {
         grant(reporter.getId(), "MODIFY");
         db.update("insert into department_head_designations(department_id,user_id,active,version) values (71,?,1,0)", reporter.getId());
         login(reporter);
+        assertThat(incidentService.getIncident(incident.getId()).isCanChangePriority()).isTrue();
         var request = new ChangePriorityRequestDto();
         request.setPriority(Priority.HIGH);
         request.setRemarks("Synthetic reassessment");
@@ -1365,6 +1366,7 @@ class IncidentAssignmentWorkflowTests {
         assertThat(history.findByIncidentIdOrderByChangedAtAscIdAsc(incident.getId()))
                 .anyMatch(row -> row.getActionType() == HistoryActionType.PRIORITY_CHANGED);
         db.update("update department_head_designations set active=0 where department_id=71 and user_id=?", reporter.getId());
+        assertThat(incidentService.getIncident(incident.getId()).isCanChangePriority()).isFalse();
         assertThatThrownBy(() -> incidentService.changePriority(incident.getId(), request))
                 .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
         db.update("update department_head_designations set active=1,department_id=72 where user_id=?", reporter.getId());
