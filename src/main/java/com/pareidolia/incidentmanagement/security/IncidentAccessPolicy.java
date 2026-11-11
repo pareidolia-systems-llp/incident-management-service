@@ -96,15 +96,21 @@ public class IncidentAccessPolicy {
     private java.util.Map<Long, String> classifications(java.util.List<Long> ids) {
         var classifications = new java.util.HashMap<Long, String>();
         @SuppressWarnings("unchecked") java.util.List<Object[]> rows = em.createNativeQuery(
-                "select incident_id,classification from incident_security_classification where incident_id in (:ids)")
+                "select incident_id,classification,version from incident_security_classification where incident_id in (:ids)")
                 .setParameter("ids", ids).getResultList();
-        for (var row : rows) classifications.put(((Number) row[0]).longValue(), String.valueOf(row[1]));
+        for (var row : rows) {
+            classifications.put(((Number) row[0]).longValue(), verifiedClassification(row[1], row[2]));
+        }
         return classifications;
     }
 
-    private static boolean validClassification(String classification) {
-        return "STANDARD".equals(classification) || "RESTRICTED".equals(classification)
-                || "UNCLASSIFIED".equals(classification);
+    private static String verifiedClassification(Object state, Object version) {
+        if (!(state instanceof String classification) || !(version instanceof Number number)) return null;
+        return switch (classification) {
+            case "UNCLASSIFIED" -> number.longValue() == 0 ? classification : null;
+            case "STANDARD", "RESTRICTED" -> number.longValue() > 0 ? classification : null;
+            default -> null;
+        };
     }
     private java.util.Set<Long> hrAccounts = java.util.Set.of();
     private java.util.Set<Long> hrDepartments = java.util.Set.of();
@@ -204,10 +210,11 @@ public class IncidentAccessPolicy {
         Object[] account=(Object[])accounts.get(0);
         if(!active(account[0]) || !(account[1] instanceof String email) || !email.equalsIgnoreCase(oidc.getEmail().trim())
                 || actor.getEmail()==null || !email.equalsIgnoreCase(actor.getEmail().trim()))return false;
-        var classes=em.createNativeQuery("select classification from incident_security_classification where incident_id=?1"+suffix).setParameter(1,incident.getId()).getResultList();
+        var classes=em.createNativeQuery("select classification,version from incident_security_classification where incident_id=?1"+suffix).setParameter(1,incident.getId()).getResultList();
         if(classes.size()!=1)return false;
-        String classification=String.valueOf(classes.get(0));
-        if(!validClassification(classification))return false;
+        var classificationRow=(Object[])classes.get(0);
+        String classification=verifiedClassification(classificationRow[0],classificationRow[1]);
+        if(classification==null)return false;
         if (!(permission == Permission.VIEW ? allowsHrScope(actor, incident) : allowsHrOperations(actor, incident))) return false;
         boolean reporter=incident.getReportedBy()!=null && email.equalsIgnoreCase(incident.getReportedBy().trim());
         if(!classification.equals("RESTRICTED") && reporter && permission==Permission.VIEW)return true;
@@ -237,7 +244,7 @@ public class IncidentAccessPolicy {
             var departmentNames = activeDepartmentNames(batch);
             @SuppressWarnings("unchecked") java.util.List<Object[]> rows=em.createNativeQuery("select incident_id,permission from incident_security_grants where user_id=:user and active=1 and incident_id in (:ids)").setParameter("user",actor.getId()).setParameter("ids",ids).getResultList();
             for(var row:rows)grants.computeIfAbsent(((Number)row[0]).longValue(),id->new java.util.HashSet<>()).add(String.valueOf(row[1]));
-            for(var incident:batch){String classification=classifications.get(incident.getId());if(!validClassification(classification) || !(permission == Permission.VIEW ? allowsHrScope(actor, incident, departmentNames) : allowsHrOperations(actor, incident, departmentNames)))continue;
+            for(var incident:batch){String classification=classifications.get(incident.getId());if(classification==null || !(permission == Permission.VIEW ? allowsHrScope(actor, incident, departmentNames) : allowsHrOperations(actor, incident, departmentNames)))continue;
         boolean reporter=incident.getReportedBy()!=null && email.equalsIgnoreCase(incident.getReportedBy().trim());
                 var permissions=grants.getOrDefault(incident.getId(),java.util.Set.of());
                 if(permission!=Permission.ASSIGN && ((!classification.equals("RESTRICTED") && reporter && permission==Permission.VIEW) || permissions.contains("VIEW") && (permission==Permission.VIEW || permissions.contains(permission.name()))))allowed.add(incident.getId());

@@ -34,10 +34,10 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /** Runs on isolated H2 by default, or only the explicitly approved Docker MySQL schema. */
-@DataJpaTest(properties={"app.incident-access.enabled=true","app.incident-security-admin.enabled=true","app.employee-management.enabled=true","app.employee-management.allowed-emails=admin@example.test","app.auth.allowed-domain=example.test","app.auth.bootstrap-admin-emails=","app.auth.bootstrap-it-handler-emails=","app.default-it-owner=owner@example.test"})
+@DataJpaTest(properties={"app.incident-access.enabled=true","app.incident-security-admin.enabled=true","app.notifications.email.recipient-administration.enabled=true","app.employee-management.enabled=true","app.employee-management.allowed-emails=admin@example.test","app.auth.allowed-domain=example.test","app.auth.bootstrap-admin-emails=","app.auth.bootstrap-it-handler-emails=","app.default-it-owner=owner@example.test"})
 @AutoConfigureTestDatabase(replace=AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("dev")
-@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,EmployeeManagementAccess.class,EmployeeDirectoryService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,IncidentAttachmentServiceImpl.class,IncidentReportServiceImpl.class})
+@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,EmployeeManagementAccess.class,EmployeeDirectoryService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,IncidentAttachmentServiceImpl.class,IncidentReportServiceImpl.class,DepartmentRecipientAdministrationService.class})
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentSecurityLockCoordinationTests {
     @DynamicPropertySource static void database(DynamicPropertyRegistry registry){
@@ -46,6 +46,8 @@ class IncidentSecurityLockCoordinationTests {
     @Autowired JdbcTemplate db;@Autowired javax.sql.DataSource source;@Autowired AppUserRepository users;@Autowired IncidentRepository incidents;
     @Autowired IncidentService incidentService;@Autowired IncidentAttachmentService attachments;@Autowired IncidentReportService reports;
     @Autowired IncidentSecurityAdministrationService administration;@Autowired EmployeeDirectoryService employees;@Autowired IncidentSecurityGate gate;
+    @Autowired DepartmentRecipientAdministrationService recipients;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     @MockitoSpyBean IncidentReadSnapshot snapshot;
     @Autowired IncidentHistoryRepository historyRepository;@Autowired IncidentAttachmentRepository attachmentRepository;
     AppUser admin,reader;Incident incident;Long attachmentId;
@@ -111,6 +113,83 @@ class IncidentSecurityLockCoordinationTests {
             }finally{release.countDown();pool.shutdownNow();}
         }
     }
+    @Test void invalidClassificationCannotReachDetailListsAttachmentsOrEitherReportSheet() throws Exception {
+        db.update("update incident_security_classification set classification='STANDARD',version=0 where incident_id=?",
+                incident.getId());
+        assertThatThrownBy(() -> incidentService.getIncident(incident.getId()))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        assertThatThrownBy(() -> incidentService.getIncidentByNumber(incident.getIncidentNumber()))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        assertThat(incidentService.getAllIncidents()).isEmpty();
+        assertThat(incidentService.getIncidentsPage(0, 10)).isEmpty();
+        assertThatThrownBy(() -> attachments.content(incident.getId(), attachmentId))
+                .isInstanceOf(com.pareidolia.incidentmanagement.exception.IncidentNotFoundException.class);
+        try (var book = new XSSFWorkbook(new ByteArrayInputStream(reports.monthly(2026, 10)))) {
+            assertThat(book.getSheet("Incidents").getPhysicalNumberOfRows()).isEqualTo(1);
+            assertThat(book.getSheet("Lifecycle History").getPhysicalNumberOfRows()).isEqualTo(1);
+        }
+    }
+
+    @Test void routingSnapshotWaitsForRecipientDeactivationCommit() throws Exception {
+        db.execute("create table if not exists employee_mapping_admins(user_id bigint primary key,active boolean)");
+        db.execute("create table if not exists employee_departments(id bigint primary key,display_name varchar(150),active boolean)");
+        db.execute("""
+                create table if not exists incident_department_mail_recipient (
+                    id char(36) primary key, department_id bigint, email varchar(254), active boolean, version bigint
+                )
+                """);
+        db.execute("""
+                create table if not exists incident_department_mail_recipient_audit (
+                    recipient_id char(36), actor_user_id bigint, old_email varchar(254), new_email varchar(254),
+                    old_active boolean, new_active boolean, version bigint, reason varchar(500),
+                    changed_at timestamp default current_timestamp, primary key(recipient_id,version)
+                )
+                """);
+        db.update("insert into employee_mapping_admins values(?,true)", admin.getId());
+        db.update("insert into employee_departments values(7,'IT',true)");
+        String email = "team@example.test";
+        login(admin);
+        var id = recipients.add(7, email, "Synthetic recipient");
+        Supplier<Integer> active = () -> db.queryForObject("""
+                select count(*) from incident_department_mail_recipient where department_id=? and email=? and active=true
+                """, Integer.class, 7L, email);
+        assertThat(snapshot.read(active)).isEqualTo(1);
+        assertThatThrownBy(() -> snapshot.read(() -> {
+            recipients.update(id, email, false, 0, "Invalid lock upgrade");
+            return null;
+        })).isInstanceOf(IllegalStateException.class).hasMessage("Security read-to-write lock upgrades are forbidden.");
+
+        var changed = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var reading = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var writer = pool.submit(() -> as(admin, () -> {
+                new org.springframework.transaction.support.TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                    recipients.update(id, email, false, 0, "Synthetic deactivation");
+                    changed.countDown();
+                    await(release);
+                });
+                return null;
+            }));
+            await(changed);
+            var read = pool.submit(() -> {
+                reading.countDown();
+                return snapshot.read(active);
+            });
+            await(reading);
+            assertThatThrownBy(() -> read.get(250, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+            release.countDown();
+            writer.get(10, TimeUnit.SECONDS);
+            assertThat(read.get(10, TimeUnit.SECONDS)).isZero();
+            assertThat(recipients.history(id)).extracting(DepartmentRecipientAdministrationService.Audit::reason)
+                    .containsExactly("Synthetic deactivation", "Synthetic recipient");
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
     @Test void viewOnlyMonitorPermissionsCannotMutate(){
         login(admin);administration.setGrant(incident.getId(),reader.getId(),"HANDLE",false,1L,"View only monitor");administration.setGrant(incident.getId(),reader.getId(),"MODIFY",false,1L,"View only monitor");login(reader);
         assertThat(incidentService.getIncident(incident.getId()).getId()).isEqualTo(incident.getId());

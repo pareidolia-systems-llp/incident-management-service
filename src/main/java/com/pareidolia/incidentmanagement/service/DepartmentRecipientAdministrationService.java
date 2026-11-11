@@ -1,11 +1,13 @@
 package com.pareidolia.incidentmanagement.service;
 
 import com.pareidolia.incidentmanagement.security.EmployeeManagementAccess;
+import com.pareidolia.incidentmanagement.security.IncidentSecurityGate;
 import jakarta.mail.internet.AddressException;
 import jakarta.mail.internet.InternetAddress;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -27,11 +29,21 @@ public class DepartmentRecipientAdministrationService {
     private final JdbcTemplate jdbc;
     private final AppUserService users;
     private final EmployeeManagementAccess access;
+    private final IncidentSecurityGate securityGate;
+    private final boolean incidentAccessEnabled;
 
-    public DepartmentRecipientAdministrationService(JdbcTemplate jdbc, AppUserService users, EmployeeManagementAccess access) {
+    public DepartmentRecipientAdministrationService(JdbcTemplate jdbc, AppUserService users, EmployeeManagementAccess access,
+            IncidentSecurityGate securityGate, @Value("${app.incident-access.enabled:false}") boolean incidentAccessEnabled) {
         this.jdbc = jdbc;
         this.users = users;
         this.access = access;
+        this.securityGate = securityGate;
+        this.incidentAccessEnabled = incidentAccessEnabled;
+    }
+
+    private void coordinateWithRouting() {
+        // Take the writer gate before locking accounts, departments, or recipients.
+        if (incidentAccessEnabled) securityGate.write();
     }
 
     @Transactional(readOnly = true)
@@ -62,6 +74,7 @@ public class DepartmentRecipientAdministrationService {
 
     @Transactional
     public UUID add(long departmentId, String email, String reason) {
+        coordinateWithRouting();
         long actor = administrator(true);
         requireReason(reason);
         String address = validatedAddress(email);
@@ -84,6 +97,7 @@ public class DepartmentRecipientAdministrationService {
 
     @Transactional
     public void update(UUID id, String email, boolean active, long expectedVersion, String reason) {
+        coordinateWithRouting();
         long actor = administrator(true);
         requireReason(reason);
         String address = validatedAddress(email);

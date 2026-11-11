@@ -28,7 +28,7 @@ class DepartmentRecipientAdministrationTests {
         var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1", "sa", "");
         db = new JdbcTemplate(source);
         transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-        service = new DepartmentRecipientAdministrationService(db, users, access);
+        service = new DepartmentRecipientAdministrationService(db, users, access, mock(com.pareidolia.incidentmanagement.security.IncidentSecurityGate.class), false);
         db.execute("create table app_users(id bigint primary key,email varchar(254),active boolean)");
         db.execute("create table employee_mapping_admins(user_id bigint primary key,active boolean)");
         db.execute("create table employee_departments(id bigint primary key,display_name varchar(150),active boolean)");
