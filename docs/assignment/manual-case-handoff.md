@@ -1,0 +1,12 @@
+# Manual case-access review before reassignment
+
+This procedure applies when guarded assignment and incident-security administration are enabled. The reviewer must have the `CASE_ACCESS_ADMIN` capability and authorized access to the case; the person performing reassignment also needs the applicable assignment authority and scope. Restricted HR cases retain their separate HR and case-access checks.
+
+1. Open the case and identify the current handler, the proposed eligible replacement, and the current assignment and classification versions. Do not change department through ordinary reassignment; transfers have separate rules.
+2. An authorized case-access administrator opens **Incident security → Case permissions**, loads the incident by its database ID, and reviews the former handler's active grants and their history. Confirm the justification for each grant through the approved access-review process. Grant history records changes and reasons, but does not identify an assignment purpose automatically.
+3. Revoke only grants the reviewer is authorized to end, one permission at a time, using **Select**, a nonblank reason and **Save permission**. The portal uses the displayed grant version and records an audit entry. Reload and review on a conflict. A reviewer cannot change their own case grant.
+4. The application blocks reassignment while the former handler has any active case grant except the original reporter's `VIEW`. Therefore, if any other grant must remain independently authorized, stop and escalate: the current model cannot preserve that grant and complete reassignment at the same time. Do not revoke or regrant independent access merely to work around the check without a separately approved access decision.
+5. Confirm the replacement meets eligibility, department and case-access requirements. An authorized assigner selects the replacement, supplies a reason and confirms reassignment. On a conflict, reload both the case permissions and assignment state and repeat the review; do not bypass the conflict.
+6. Verify the new handler and the assignment history, and review the former handler's grant history. The system records individual grant changes and assignment history with reasons. No automatic bulk grant revocation occurs.
+
+The API applies the same case scope, capability, reason and version checks. This procedure does not grant permissions, alter HR confidentiality, or authorize cross-department transfers. Grant provenance may be considered separately in a future release.

@@ -1549,6 +1549,32 @@ class IncidentAssignmentWorkflowTests {
                 .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
     }
 
+    @Test void manualReassignmentRequiresAuthorizedAuditedGrantReconciliationOverHttp() throws Exception {
+        standard();
+        var mvc = MockMvcBuilders.standaloneSetup(
+                new com.pareidolia.incidentmanagement.controller.IncidentAssignmentController(assignments),
+                new com.pareidolia.incidentmanagement.controller.IncidentSecurityAdministrationController(administration))
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
+        String assignment = "/api/incident-assignment/" + incident.getId();
+        String body = "{\"handlerUserId\":" + handler.getId() + ",\"expectedVersion\":0,\"expectedClassificationVersion\":1,\"reason\":\"Initial assignment\"}";
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(assignment).contentType("application/json").content(body)).andExpect(status().isOk());
+        String reassign = "{\"handlerUserId\":" + alternate.getId() + ",\"expectedVersion\":1,\"expectedClassificationVersion\":1,\"reason\":\"Approved handoff\"}";
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(assignment).contentType("application/json").content(reassign)).andExpect(status().isConflict());
+        String grantBase = "/api/admin/incident-security/" + incident.getId() + "/grants/" + handler.getId() + "/";
+        String revoke = "{\"active\":false,\"expectedVersion\":1,\"reason\":\"Reviewed handoff\"}";
+        login(reporter);
+        mvc.perform(put(grantBase + "VIEW").contentType("application/json").content(revoke)).andExpect(status().isForbidden());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(assignment).contentType("application/json").content(reassign)).andExpect(status().isForbidden());
+        login(classifier);
+        mvc.perform(put(grantBase + "VIEW").contentType("application/json").content(revoke)).andExpect(status().isOk());
+        mvc.perform(put(grantBase + "HANDLE").contentType("application/json").content(revoke)).andExpect(status().isOk());
+        assertThat(db.queryForObject("select count(*) from incident_security_grant_audit where incident_id=? and target_user_id=? and new_active=0 and reason='Reviewed handoff'", Long.class, incident.getId(), handler.getId())).isEqualTo(2L);
+        login(assigner);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(assignment).contentType("application/json").content(reassign.replace("Approved handoff", " "))).andExpect(status().isBadRequest());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(assignment).contentType("application/json").content(reassign)).andExpect(status().isOk()).andExpect(jsonPath("$.handler.id").value(alternate.getId()));
+        assertThat(assignments.history(incident.getId())).hasSize(2);
+    }
+
     @Test void httpContractsUseStableIdsAndValidatedVersions()throws Exception{
         standard();var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(new com.pareidolia.incidentmanagement.controller.IncidentAssignmentController(assignments)).setControllerAdvice(new com.pareidolia.incidentmanagement.exception.GlobalExceptionHandler()).build();
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/incident-assignment/handlers").param("search","handler").param("incidentId",String.valueOf(incident.getId()))).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk()).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$[0].id").value(handler.getId()));
