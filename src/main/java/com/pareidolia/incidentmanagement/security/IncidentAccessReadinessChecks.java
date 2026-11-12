@@ -3,6 +3,7 @@ package com.pareidolia.incidentmanagement.security;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Objects;
 import org.springframework.dao.DataAccessException;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -10,6 +11,8 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.security.config.oauth2.client.CommonOAuth2Provider;
+import org.springframework.security.oauth2.client.registration.ClientRegistration;
 
 /** Read-only diagnostics only. Passing these checks does not permit activation. */
 public final class IncidentAccessReadinessChecks {
@@ -54,9 +57,33 @@ public final class IncidentAccessReadinessChecks {
 
     public enum Result { READY_FOR_FURTHER_CHECKS, UNSUPPORTED_DATABASE, MISSING_TABLES,
         INVALID_SECURITY_LOCK, INVALID_DEPARTMENTS, INVALID_CLASSIFICATIONS,
-        HR_HANDLER_UNAVAILABLE, INVALID_TIMEOUT, UNSAFE_CONFIGURATION, UNAVAILABLE }
+        HR_HANDLER_UNAVAILABLE, INVALID_TIMEOUT, INVALID_OAUTH, UNSAFE_CONFIGURATION, UNAVAILABLE }
 
     private IncidentAccessReadinessChecks() { }
+
+    /** Preliminary inspection only; it does not validate credentials with Google or permit activation. */
+    public static Result inspectGoogleRegistration(ClientRegistration registration, String allowedDomain) {
+        if (registration == null || allowedDomain == null || !allowedDomain.trim().matches(
+                "(?i)(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"))
+            return Result.INVALID_OAUTH;
+        var google = CommonOAuth2Provider.GOOGLE.getBuilder("google")
+                .clientId("diagnostic").clientSecret("diagnostic").build();
+        var actualProvider = registration.getProviderDetails();
+        var expectedProvider = google.getProviderDetails();
+        if (!"google".equals(registration.getRegistrationId())
+                || registration.getClientId() == null || registration.getClientId().isBlank()
+                || registration.getClientSecret() == null || registration.getClientSecret().isBlank()
+                || !registration.getAuthorizationGrantType().equals(google.getAuthorizationGrantType())
+                || !registration.getClientAuthenticationMethod().equals(google.getClientAuthenticationMethod())
+                || !registration.getScopes().containsAll(Set.of("openid", "email"))
+                || !Objects.equals(actualProvider.getAuthorizationUri(), expectedProvider.getAuthorizationUri())
+                || !Objects.equals(actualProvider.getTokenUri(), expectedProvider.getTokenUri())
+                || !Objects.equals(actualProvider.getJwkSetUri(), expectedProvider.getJwkSetUri())
+                || !Objects.equals(actualProvider.getUserInfoEndpoint().getUri(), expectedProvider.getUserInfoEndpoint().getUri())
+                || !Objects.equals(actualProvider.getIssuerUri(), expectedProvider.getIssuerUri()))
+            return Result.INVALID_OAUTH;
+        return Result.READY_FOR_FURTHER_CHECKS;
+    }
 
     /** Preliminary configuration checks only; does not verify OAuth or permit activation. */
     public static Result inspectConfiguration(Environment env) {

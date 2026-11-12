@@ -13,6 +13,24 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class IncidentAccessReadinessChecksTests {
+    @Test void googleRegistrationRequiresApprovedProviderAndOidcEmailScope() {
+        var google = org.springframework.security.config.oauth2.client.CommonOAuth2Provider.GOOGLE.getBuilder("google")
+                .clientId("synthetic").clientSecret("synthetic").build();
+        assertThat(IncidentAccessReadinessChecks.inspectGoogleRegistration(google, "example.test"))
+                .isEqualTo(IncidentAccessReadinessChecks.Result.READY_FOR_FURTHER_CHECKS);
+        assertThat(IncidentAccessReadinessChecks.inspectGoogleRegistration(null, "example.test"))
+                .isEqualTo(IncidentAccessReadinessChecks.Result.INVALID_OAUTH);
+        assertThat(IncidentAccessReadinessChecks.inspectGoogleRegistration(google, "not a domain"))
+                .isEqualTo(IncidentAccessReadinessChecks.Result.INVALID_OAUTH);
+        var altered = org.springframework.security.oauth2.client.registration.ClientRegistration.withClientRegistration(google)
+                .authorizationUri("https://untrusted.example.test/auth").build();
+        assertThat(IncidentAccessReadinessChecks.inspectGoogleRegistration(altered, "example.test"))
+                .isEqualTo(IncidentAccessReadinessChecks.Result.INVALID_OAUTH);
+        var noOidc = org.springframework.security.oauth2.client.registration.ClientRegistration.withClientRegistration(google)
+                .scope("email").build();
+        assertThat(IncidentAccessReadinessChecks.inspectGoogleRegistration(noOidc, "example.test"))
+                .isEqualTo(IncidentAccessReadinessChecks.Result.INVALID_OAUTH);
+    }
     private JdbcTemplate jdbc;
     @BeforeEach void setup() {
         jdbc = mock(JdbcTemplate.class);
