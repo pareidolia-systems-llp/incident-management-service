@@ -17,6 +17,16 @@ import java.util.List;
 public class WorkLogServiceImpl implements WorkLogService {
     private final AppUserService users;
     private final WorkLogRepository entries;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.pareidolia.incidentmanagement.security.IncidentSecurityGate securityGate;
+    @org.springframework.beans.factory.annotation.Value("${app.incident-access.enabled:false}")
+    private boolean incidentAccessEnabled;
+
+    private void protect(boolean write) {
+        if (!incidentAccessEnabled) return;
+        if (securityGate == null) throw new IllegalStateException("Security gate unavailable.");
+        if (write) securityGate.write(); else securityGate.read();
+    }
 
     private AppUser operationalUser() {
         AppUser actor = users.getAuthenticatedUser();
@@ -28,8 +38,9 @@ public class WorkLogServiceImpl implements WorkLogService {
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional
     public List<WorkLogResponseDto> listOwnEntries() {
+        protect(false);
         return entries.findByOwnerIdOrderByWorkedAtDescIdDesc(operationalUser().getId()).stream()
                 .map(this::response).toList();
     }
@@ -37,6 +48,7 @@ public class WorkLogServiceImpl implements WorkLogService {
     @Override
     @Transactional
     public WorkLogResponseDto createOwnEntry(CreateWorkLogRequestDto request) {
+        protect(true);
         AppUser actor = operationalUser();
         if (request.getWorkedAt().getYear() < 1900 || request.getWorkedAt().getYear() > 9998) {
             throw new InvalidRequestException("Select a work date from 1900 to 9998.");

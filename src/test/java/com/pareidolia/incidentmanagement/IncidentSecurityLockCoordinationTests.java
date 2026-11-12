@@ -37,7 +37,7 @@ import static org.mockito.Mockito.*;
 @DataJpaTest(properties={"app.incident-access.enabled=true","app.incident-security-admin.enabled=true","app.notifications.email.recipient-administration.enabled=true","app.employee-management.enabled=true","app.employee-management.allowed-emails=admin@example.test","app.auth.allowed-domain=example.test","app.auth.bootstrap-admin-emails=","app.auth.bootstrap-it-handler-emails=","app.default-it-owner=owner@example.test"})
 @AutoConfigureTestDatabase(replace=AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("dev")
-@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,EmployeeManagementAccess.class,EmployeeDirectoryService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,IncidentAttachmentServiceImpl.class,IncidentReportServiceImpl.class,DepartmentRecipientAdministrationService.class})
+@Import({IncidentSecurityGate.class,IncidentReadSnapshot.class,IncidentAccessPolicy.class,AppUserService.class,EmployeeManagementAccess.class,EmployeeDirectoryService.class,IncidentSecurityAdministrationService.class,IncidentServiceImpl.class,IncidentMapper.class,IncidentAttachmentServiceImpl.class,IncidentReportServiceImpl.class,DepartmentRecipientAdministrationService.class,WorkLogServiceImpl.class})
 @Transactional(propagation=Propagation.NOT_SUPPORTED)
 class IncidentSecurityLockCoordinationTests {
     @DynamicPropertySource static void database(DynamicPropertyRegistry registry){
@@ -47,6 +47,7 @@ class IncidentSecurityLockCoordinationTests {
     @Autowired IncidentService incidentService;@Autowired IncidentAttachmentService attachments;@Autowired IncidentReportService reports;
     @Autowired IncidentSecurityAdministrationService administration;@Autowired EmployeeDirectoryService employees;@Autowired IncidentSecurityGate gate;
     @Autowired DepartmentRecipientAdministrationService recipients;
+    @Autowired WorkLogService workLogs;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     @MockitoSpyBean IncidentReadSnapshot snapshot;
     @Autowired IncidentHistoryRepository historyRepository;@Autowired IncidentAttachmentRepository attachmentRepository;
@@ -77,6 +78,27 @@ class IncidentSecurityLockCoordinationTests {
     @AfterEach void cleanup(){SecurityContextHolder.clearContext();reset(snapshot);}
     <T>T as(AppUser user,Callable<T> action)throws Exception{login(user);try{return action.call();}finally{SecurityContextHolder.clearContext();}}
     static void await(CountDownLatch latch){try{if(!latch.await(10,TimeUnit.SECONDS))throw new IllegalStateException("Test latch timed out");}catch(InterruptedException ex){Thread.currentThread().interrupt();throw new IllegalStateException(ex);}}
+    @Test void workLogOperationsWaitForCommittedDeactivationAndThenDeny() throws Exception {
+        var changed=new CountDownLatch(1); var release=new CountDownLatch(1); var started=new CountDownLatch(2);
+        var pool=Executors.newFixedThreadPool(3);
+        try {
+            var deactivate=pool.submit(()->as(admin,()->{
+                new org.springframework.transaction.support.TransactionTemplate(transactionManager).executeWithoutResult(status->{
+                    employees.status(reader.getId(),false,0L,"Synthetic deactivation"); changed.countDown(); await(release);
+                }); return null;
+            }));
+            await(changed);
+            var read=pool.submit(()->as(reader,()->{started.countDown();return workLogs.listOwnEntries();}));
+            var write=pool.submit(()->as(reader,()->{started.countDown();var request=new com.pareidolia.incidentmanagement.dto.CreateWorkLogRequestDto();request.setWorkedAt(java.time.LocalDateTime.of(2026,1,1,0,0));request.setCategory("OTHER");request.setSummary("Synthetic");return workLogs.createOwnEntry(request);}));
+            await(started);
+            assertThatThrownBy(()->read.get(250,TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+            assertThatThrownBy(()->write.get(250,TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+            release.countDown(); deactivate.get(10,TimeUnit.SECONDS);
+            assertThatThrownBy(()->read.get(10,TimeUnit.SECONDS)).hasCauseInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+            assertThatThrownBy(()->write.get(10,TimeUnit.SECONDS)).hasCauseInstanceOf(org.springframework.security.access.AccessDeniedException.class);
+            assertThat(db.queryForObject("select count(*) from work_log_entries",Long.class)).isZero();
+        } finally { release.countDown(); pool.shutdownNow(); }
+    }
     @Test void readLinearizesBeforeRevocationAndLaterReadsDeny()throws Exception{
         var pool=Executors.newFixedThreadPool(2);var copied=new CountDownLatch(1);var release=new CountDownLatch(1);var started=new CountDownLatch(1);
         try{
