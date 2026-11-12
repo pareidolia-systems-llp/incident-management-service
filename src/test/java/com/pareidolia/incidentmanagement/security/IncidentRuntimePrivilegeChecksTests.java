@@ -23,6 +23,11 @@ class IncidentRuntimePrivilegeChecksTests {
     @Test void reviewedManifestIsOnlyPreliminary() {
         assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.VERIFIED_FOR_FURTHER_CHECKS);
     }
+    @Test void missingRecipientVersionMetadataFailsClosed() {
+        grants.addAll(IncidentRuntimePrivilegeChecks.EMAIL_REQUIRED);
+        grants.remove("incident_department_mail_recipient|SELECT|version");
+        assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc,true)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);
+    }
     @Test void missingIncidentHistoryInsertFailsClosed() {
         grants.remove("incident_history|INSERT|*");
         assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);

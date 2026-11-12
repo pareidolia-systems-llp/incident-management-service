@@ -142,7 +142,7 @@ public final class IncidentRuntimePrivilegeChecks {
 
     // Additional columns used by the approved managed-recipient email paths.
     static final Set<String> EMAIL_REQUIRED = Set.of(
-            "incident_department_mail_recipient|SELECT|department_id", "incident_department_mail_recipient|SELECT|email", "incident_department_mail_recipient|SELECT|active",
+            "incident_department_mail_recipient|SELECT|department_id", "incident_department_mail_recipient|SELECT|email", "incident_department_mail_recipient|SELECT|active", "incident_department_mail_recipient|SELECT|version",
             "incident_department_head_email_receipt|SELECT|incident_id", "incident_department_head_email_receipt|SELECT|recipient_user_id", "incident_department_head_email_receipt|SELECT|status",
             "incident_department_head_email_receipt|INSERT|incident_id", "incident_department_head_email_receipt|INSERT|recipient_user_id", "incident_department_head_email_receipt|INSERT|status",
             "incident_department_head_email_receipt|UPDATE|status", "incident_department_head_email_receipt|UPDATE|finished_at",

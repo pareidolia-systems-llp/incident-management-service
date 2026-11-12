@@ -17,7 +17,9 @@ public final class IncidentStartupBoundsChecks {
             long acquisition=source.getConnectionTimeout(), validation=source.getValidationTimeout();
             if (acquisition < 250 || acquisition > 5000 || validation < 250 || validation > acquisition
                     || jdbc.getQueryTimeout() <= 0 || jdbc.getQueryTimeout() > 5
-                    || overallDeadlineMillis < 1000 || overallDeadlineMillis > 30000) return Result.UNSAFE_CONFIGURATION;
+                    || overallDeadlineMillis < 1000 || overallDeadlineMillis > 30000
+                    || acquisition > overallDeadlineMillis || jdbc.getQueryTimeout() * 1000L > overallDeadlineMillis)
+                return Result.UNSAFE_CONFIGURATION;
             String url=source.getJdbcUrl();
             if (url == null || !url.startsWith("jdbc:mysql://")) return Result.UNSAFE_CONFIGURATION;
             URI uri=URI.create(url.substring(5));
@@ -35,7 +37,8 @@ public final class IncidentStartupBoundsChecks {
                 return Result.UNSAFE_CONFIGURATION;
             int connect=Integer.parseInt(params.getOrDefault("connectTimeout","0"));
             int socket=Integer.parseInt(params.getOrDefault("socketTimeout","0"));
-            if (connect <= 0 || connect > 5000 || socket <= 0 || socket > 10000) return Result.UNSAFE_CONFIGURATION;
+            if (connect <= 0 || connect > 5000 || socket <= 0 || socket > 10000
+                    || connect > overallDeadlineMillis || socket > overallDeadlineMillis) return Result.UNSAFE_CONFIGURATION;
             return Result.CONFIGURED_FOR_FURTHER_CHECKS;
         } catch (RuntimeException failure) { return Result.UNSAFE_CONFIGURATION; }
     }

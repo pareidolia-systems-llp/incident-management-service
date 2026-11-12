@@ -33,5 +33,6 @@ class IncidentStartupBoundsChecksTests {
     @Test void invalidOverallDeadlineIsRejected() {
         assertThat(IncidentStartupBoundsChecks.inspect(source,jdbc,0)).isEqualTo(IncidentStartupBoundsChecks.Result.UNSAFE_CONFIGURATION);
         assertThat(IncidentStartupBoundsChecks.inspect(source,jdbc,30001)).isEqualTo(IncidentStartupBoundsChecks.Result.UNSAFE_CONFIGURATION);
+        assertThat(IncidentStartupBoundsChecks.inspect(source,jdbc,2000)).isEqualTo(IncidentStartupBoundsChecks.Result.UNSAFE_CONFIGURATION);
     }
 }

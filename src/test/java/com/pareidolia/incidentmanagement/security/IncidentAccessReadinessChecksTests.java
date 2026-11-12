@@ -69,6 +69,13 @@ class IncidentAccessReadinessChecksTests {
     @Test void validStateIsOnlyReadyForFurtherChecks() {
         assertThat(check()).isEqualTo(IncidentAccessReadinessChecks.Result.READY_FOR_FURTHER_CHECKS);
     }
+    @Test void configuredHrDepartmentMustBeTheActiveHrDepartment() {
+        String sql="select count(*) from employee_departments where id=? and active=1 and binary display_name in ('HR','Human Resources')";
+        when(jdbc.queryForObject(sql,Long.class,2L)).thenReturn(1L);
+        when(jdbc.queryForObject(sql,Long.class,3L)).thenReturn(0L);
+        assertThat(IncidentAccessReadinessChecks.inspectHrDepartments(jdbc,Set.of(2L))).isEqualTo(IncidentAccessReadinessChecks.Result.READY_FOR_FURTHER_CHECKS);
+        assertThat(IncidentAccessReadinessChecks.inspectHrDepartments(jdbc,Set.of(3L))).isEqualTo(IncidentAccessReadinessChecks.Result.INVALID_DEPARTMENTS);
+    }
     @Test void nonMysqlIsRejected() {
         when(jdbc.execute(any(ConnectionCallback.class))).thenReturn("H2");
         assertThat(check()).isEqualTo(IncidentAccessReadinessChecks.Result.UNSUPPORTED_DATABASE);

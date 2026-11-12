@@ -129,7 +129,9 @@ public final class IncidentAccessReadinessChecks {
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
             transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
             transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-            transaction.setTimeout(10);
+            // Spring applies the transaction deadline to JDBC statements. Keep it no
+            // longer than the validated query bound so a lock wait cannot inherit 10s.
+            transaction.setTimeout(jdbc.getQueryTimeout());
             Result result = transaction.execute(status -> {
                 try {
                     Long row = jdbc.queryForObject("select id from incident_security_lock where id=1 for update", Long.class);
@@ -142,6 +144,18 @@ public final class IncidentAccessReadinessChecks {
         } catch (DataAccessException | TransactionException ex) {
             return Result.UNAVAILABLE;
         }
+    }
+
+    /** HR IDs must point to the active HR department whose membership is checked above. */
+    static Result inspectHrDepartments(JdbcTemplate jdbc, Set<Long> ids) {
+        if (ids == null || ids.isEmpty()) return Result.INVALID_DEPARTMENTS;
+        try {
+            for (Long id : ids) {
+                if (id == null || id <= 0 || !Long.valueOf(1).equals(jdbc.queryForObject(
+                        "select count(*) from employee_departments where id=? and active=1 and binary display_name in ('HR','Human Resources')",Long.class,id))) return Result.INVALID_DEPARTMENTS;
+            }
+            return Result.READY_FOR_FURTHER_CHECKS;
+        } catch (DataAccessException ex) { return Result.UNAVAILABLE; }
     }
 
     /** Diagnostic queries require a per-statement timeout; connection acquisition is not bounded here. */
