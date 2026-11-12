@@ -140,14 +140,27 @@ public final class IncidentRuntimePrivilegeChecks {
 
     public enum Result { VERIFIED_FOR_FURTHER_CHECKS, MISSING_PRIVILEGE, UNSUPPORTED_ROLE, UNAVAILABLE }
 
+    // Additional columns used by the approved managed-recipient email paths.
+    static final Set<String> EMAIL_REQUIRED = Set.of(
+            "incident_department_mail_recipient|SELECT|department_id", "incident_department_mail_recipient|SELECT|email", "incident_department_mail_recipient|SELECT|active",
+            "incident_department_head_email_receipt|SELECT|incident_id", "incident_department_head_email_receipt|SELECT|recipient_user_id", "incident_department_head_email_receipt|SELECT|status",
+            "incident_department_head_email_receipt|INSERT|incident_id", "incident_department_head_email_receipt|INSERT|recipient_user_id", "incident_department_head_email_receipt|INSERT|status",
+            "incident_department_head_email_receipt|UPDATE|status", "incident_department_head_email_receipt|UPDATE|finished_at",
+            "incident_department_detail_email_receipt|SELECT|incident_id", "incident_department_detail_email_receipt|SELECT|recipient_user_id", "incident_department_detail_email_receipt|SELECT|status",
+            "incident_department_detail_email_receipt|INSERT|incident_id", "incident_department_detail_email_receipt|INSERT|recipient_user_id", "incident_department_detail_email_receipt|INSERT|status",
+            "incident_department_detail_email_receipt|UPDATE|status", "incident_department_detail_email_receipt|UPDATE|finished_at");
+
     /** Conservative: accepts direct table/column grants only, and rejects active roles. */
     public static Result inspect(JdbcTemplate jdbc) {
+        return inspect(jdbc,false);
+    }
+    public static Result inspect(JdbcTemplate jdbc, boolean managedEmailEnabled) {
         if (jdbc == null || jdbc.getQueryTimeout() <= 0 || jdbc.getQueryTimeout() > 5) return Result.UNAVAILABLE;
         try {
             Result result = jdbc.execute((ConnectionCallback<Result>) connection -> {
                 JdbcTemplate scoped = new JdbcTemplate(new SingleConnectionDataSource(connection, true));
                 scoped.setQueryTimeout(jdbc.getQueryTimeout());
-                return inspectOnConnection(scoped);
+                return inspectOnConnection(scoped,managedEmailEnabled);
             });
             return result == null ? Result.UNAVAILABLE : result;
         } catch (DataAccessException ex) {
@@ -156,11 +169,16 @@ public final class IncidentRuntimePrivilegeChecks {
     }
 
     static Result inspectOnConnection(JdbcTemplate jdbc) {
+        return inspectOnConnection(jdbc,false);
+    }
+    static Result inspectOnConnection(JdbcTemplate jdbc, boolean managedEmailEnabled) {
         try {
             if (!"NONE".equals(jdbc.queryForObject(ROLE_SQL, String.class))) return Result.UNSUPPORTED_ROLE;
             Set<String> privileges = new HashSet<>(jdbc.queryForList(TABLE_SQL, String.class));
             privileges.addAll(jdbc.queryForList(COLUMN_SQL, String.class));
-            for (String required : REQUIRED) {
+            Set<String> requiredPrivileges=new HashSet<>(REQUIRED);
+            if (managedEmailEnabled) requiredPrivileges.addAll(EMAIL_REQUIRED);
+            for (String required : requiredPrivileges) {
                 int separator = required.lastIndexOf('|');
                 if (!privileges.contains(required) && !privileges.contains(required.substring(0, separator + 1) + "*"))
                     return Result.MISSING_PRIVILEGE;

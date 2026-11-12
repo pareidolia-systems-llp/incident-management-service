@@ -82,5 +82,6 @@ class IncidentCriticalSchemaChecksTests {
         assertThat(real.queryForList(IncidentCriticalSchemaChecks.FOREIGN_KEYS,String.class)).containsAll(IncidentCriticalSchemaChecks.REQUIRED_FKS);
         assertThat(real.queryForList(IncidentCriticalSchemaChecks.CHECKS,String.class).stream().map(IncidentCriticalSchemaChecks::canonical).toList()).containsAll(IncidentCriticalSchemaChecks.REQUIRED_CHECKS);
         assertThat(IncidentCriticalSchemaChecks.inspect(real)).isEqualTo(IncidentCriticalSchemaChecks.Result.VERIFIED_FOR_FURTHER_CHECKS);
+        assertThat(IncidentRuntimePrivilegeChecks.inspect(real,true)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);
     }
 }

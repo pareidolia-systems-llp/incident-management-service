@@ -56,6 +56,13 @@ class IncidentRuntimePrivilegeChecksTests {
         grants.remove("incidents|SELECT|*");
         assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);
     }
+    @Test void enabledManagedEmailRequiresRecipientReadsAndBothReceiptWrites() {
+        assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc,true)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);
+        grants.addAll(IncidentRuntimePrivilegeChecks.EMAIL_REQUIRED);
+        assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc,true)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.VERIFIED_FOR_FURTHER_CHECKS);
+        grants.remove("incident_department_detail_email_receipt|INSERT|status");
+        assertThat(IncidentRuntimePrivilegeChecks.inspectOnConnection(jdbc,true)).isEqualTo(IncidentRuntimePrivilegeChecks.Result.MISSING_PRIVILEGE);
+    }
     @Test
     @org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable(named="V2_PRIVILEGE_MYSQL_PROOF",matches="true")
     void isolatedMysqlDirectPrivilegesMatchExpectedAccount() {

@@ -97,6 +97,30 @@ public final class IncidentAccessReadinessChecks {
         return Result.READY_FOR_FURTHER_CHECKS;
     }
 
+    /** Preliminary V2 dependency checks for the reviewed single-account membership mode. */
+    public static Result inspectV2Dependencies(Environment env) {
+        if (env == null) return Result.UNSAFE_CONFIGURATION;
+        try {
+            if (inspectConfiguration(env) != Result.READY_FOR_FURTHER_CHECKS) return Result.UNSAFE_CONFIGURATION;
+            for (String property : List.of("app.employee-management.production-enabled", "app.incident-security-admin.enabled",
+                    "app.department-membership-admin.enabled", "app.department-head-designations.enabled", "app.handler-eligibility-admin.enabled")) {
+                if (!env.getProperty(property,Boolean.class,false)) return Result.UNSAFE_CONFIGURATION;
+            }
+            if (env.getProperty("app.department-membership-admin.dedicated-command.enabled",Boolean.class,false)
+                    || env.getProperty("app.hr-reassignment-referrals.enabled",Boolean.class,false)
+                    || env.getProperty("app.notifications.oversight.enabled",Boolean.class,false)
+                    || env.getProperty("app.incident-transfer.handoff-approved",Boolean.class,false)) return Result.UNSAFE_CONFIGURATION;
+            for (String property : List.of("app.employee-management.allowed-emails", "app.department-membership-admin.allowed-emails",
+                    "app.handler-eligibility-admin.allowed-emails", "app.incident-access.hr-account-ids", "app.incident-access.hr-department-ids")) {
+                if (env.getProperty(property, "").isBlank()) return Result.UNSAFE_CONFIGURATION;
+            }
+            String pairs=env.getProperty("app.incident-assignment.allowed-actor-handler-pairs", "");
+            if (pairs.isBlank()) return Result.UNSAFE_CONFIGURATION;
+            for (String pair:pairs.split(",",-1)) if (!pair.trim().matches("[1-9][0-9]*:[1-9][0-9]*")) return Result.UNSAFE_CONFIGURATION;
+            return Result.READY_FOR_FURTHER_CHECKS;
+        } catch (RuntimeException failure) { return Result.UNSAFE_CONFIGURATION; }
+    }
+
     /** Holds the same writer gate as security changes for one rollback-only diagnostic snapshot. */
     public static Result inspectCoordinated(JdbcTemplate jdbc, Set<Long> configuredHrAccountIds, String allowedDomain) {
         if (jdbc.getQueryTimeout() <= 0 || jdbc.getQueryTimeout() > 5) return Result.INVALID_TIMEOUT;

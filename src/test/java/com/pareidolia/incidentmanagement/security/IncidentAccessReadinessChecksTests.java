@@ -13,6 +13,26 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class IncidentAccessReadinessChecksTests {
+    @Test void v2DependenciesRejectMissingAndIncompatibleSettings() {
+        var env=new MockEnvironment().withProperty("app.incident-access.enabled","true")
+                .withProperty("app.incident-assignment.enabled","true").withProperty("app.employee-management.enabled","true")
+                .withProperty("spring.jpa.hibernate.ddl-auto","validate").withProperty("spring.sql.init.mode","never")
+                .withProperty("app.employee-management.production-enabled","true").withProperty("app.incident-security-admin.enabled","true")
+                .withProperty("app.department-membership-admin.enabled","true").withProperty("app.department-head-designations.enabled","true")
+                .withProperty("app.handler-eligibility-admin.enabled","true").withProperty("app.employee-management.allowed-emails","synthetic@example.test")
+                .withProperty("app.department-membership-admin.allowed-emails","synthetic@example.test").withProperty("app.handler-eligibility-admin.allowed-emails","synthetic@example.test")
+                .withProperty("app.incident-access.hr-account-ids","1").withProperty("app.incident-access.hr-department-ids","2")
+                .withProperty("app.incident-assignment.allowed-actor-handler-pairs","1:2");
+        assertThat(IncidentAccessReadinessChecks.inspectV2Dependencies(env)).isEqualTo(IncidentAccessReadinessChecks.Result.READY_FOR_FURTHER_CHECKS);
+        env.setProperty("app.department-head-designations.enabled","false");
+        assertThat(IncidentAccessReadinessChecks.inspectV2Dependencies(env)).isEqualTo(IncidentAccessReadinessChecks.Result.UNSAFE_CONFIGURATION);
+        env.setProperty("app.department-head-designations.enabled","true");
+        env.setProperty("app.department-membership-admin.dedicated-command.enabled","true");
+        assertThat(IncidentAccessReadinessChecks.inspectV2Dependencies(env)).isEqualTo(IncidentAccessReadinessChecks.Result.UNSAFE_CONFIGURATION);
+        env.setProperty("app.department-membership-admin.dedicated-command.enabled","false");
+        env.setProperty("app.incident-assignment.allowed-actor-handler-pairs","bad");
+        assertThat(IncidentAccessReadinessChecks.inspectV2Dependencies(env)).isEqualTo(IncidentAccessReadinessChecks.Result.UNSAFE_CONFIGURATION);
+    }
     @Test void googleRegistrationRequiresApprovedProviderAndOidcEmailScope() {
         var google = org.springframework.security.config.oauth2.client.CommonOAuth2Provider.GOOGLE.getBuilder("google")
                 .clientId("synthetic").clientSecret("synthetic").build();

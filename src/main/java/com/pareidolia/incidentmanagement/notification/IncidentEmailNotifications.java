@@ -416,6 +416,10 @@ public final class IncidentEmailNotifications {
                 && !p.containsKey("mail.smtp.proxy.host") && !p.containsKey("mail.smtp.socks.host")
                 && !p.containsKey("mail.smtp.socketFactory.class");
     }
+    static boolean approvedProductionDelivery(JavaMailSender sender, String from) {
+        try { return APPROVED_PRODUCTION_SENDER.equals(address(from)) && approvedPostfix(sender); }
+        catch (IllegalArgumentException failure) { return false; }
+    }
     static Set<String> addresses(String value) {
         var result=new LinkedHashSet<String>();
         if(value==null || value.isBlank()) return result;
